@@ -1,4 +1,5 @@
 // app/game/[slug]/page.tsx
+export const dynamic = "force-dynamic";
 import { notFound } from "next/navigation";
 import { prisma } from "@/lib/db";
 import { TopUpFlow } from "@/components/game-topup/topup-flow";
@@ -40,7 +41,7 @@ export default async function GameTopUpPage({ params }: { params: { slug: string
   );
 }
 
-export async function generateStaticParams() {
-  const games = await prisma.game.findMany({ select: { slug: true } });
-  return games.map((g) => ({ slug: g.slug }));
-}
+// export async function generateStaticParams() {
+//   const games = await prisma.game.findMany({ select: { slug: true } });
+//   return games.map((g) => ({ slug: g.slug }));
+// }
