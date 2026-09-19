@@ -13,7 +13,7 @@ export async function signUpAction(input: RegisterInput): Promise<ActionResult> 
   }
   const { name, username, email, password } = parsed.data;
 
-  const supabase = await createClient();
+  const supabase = createClient();
 
   const { data: existing } = await supabase
     .from("profiles")
@@ -53,7 +53,7 @@ export async function signInAction(input: LoginInput): Promise<ActionResult> {
     return { success: false, error: parsed.error.issues[0]?.message ?? "Invalid input" };
   }
 
-  const supabase = await createClient();
+  const supabase = createClient();
   const { error } = await supabase.auth.signInWithPassword(parsed.data);
   if (error) {
     return { success: false, error: "Incorrect email or password" };
@@ -63,7 +63,7 @@ export async function signInAction(input: LoginInput): Promise<ActionResult> {
 }
 
 export async function signOutAction() {
-  const supabase = await createClient();
+  const supabase = createClient();
   await supabase.auth.signOut();
   redirect("/");
 }
