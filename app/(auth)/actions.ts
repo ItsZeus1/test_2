@@ -13,13 +13,15 @@ export async function signUpAction(input: RegisterInput): Promise<ActionResult> 
   }
   const { name, username, email, password } = parsed.data;
 
-  const supabase = createClient();
+  // Added await here
+  const supabase = await createClient();
 
   const { data: existing } = await supabase
     .from("profiles")
     .select("id")
     .eq("username", username)
     .maybeSingle();
+    
   if (existing) {
     return { success: false, error: "That username is already taken" };
   }
@@ -28,6 +30,7 @@ export async function signUpAction(input: RegisterInput): Promise<ActionResult> 
     email,
     password,
   });
+  
   if (signUpError || !signUpData.user) {
     return { success: false, error: signUpError?.message ?? "Could not create account" };
   }
@@ -40,6 +43,7 @@ export async function signUpAction(input: RegisterInput): Promise<ActionResult> 
     role: "NORMAL",
     balance: 0,
   });
+  
   if (profileError) {
     return { success: false, error: "Account created but profile setup failed. Contact support." };
   }
@@ -53,7 +57,9 @@ export async function signInAction(input: LoginInput): Promise<ActionResult> {
     return { success: false, error: parsed.error.issues[0]?.message ?? "Invalid input" };
   }
 
-  const supabase = createClient();
+  // Added await here
+  const supabase = await createClient();
+  
   const { error } = await supabase.auth.signInWithPassword(parsed.data);
   if (error) {
     return { success: false, error: "Incorrect email or password" };
@@ -63,7 +69,8 @@ export async function signInAction(input: LoginInput): Promise<ActionResult> {
 }
 
 export async function signOutAction() {
-  const supabase = createClient();
+  // Added await here
+  const supabase = await createClient();
   await supabase.auth.signOut();
   redirect("/");
 }
