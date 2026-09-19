@@ -53,7 +53,7 @@ export async function signInAction(input: LoginInput): Promise<ActionResult> {
     return { success: false, error: parsed.error.issues[0]?.message ?? "Invalid input" };
   }
 
-  const supabase = createClient();
+  const supabase = await createClient();
   const { error } = await supabase.auth.signInWithPassword(parsed.data);
   if (error) {
     return { success: false, error: "Incorrect email or password" };
@@ -63,7 +63,7 @@ export async function signInAction(input: LoginInput): Promise<ActionResult> {
 }
 
 export async function signOutAction() {
-  const supabase = createClient();
+  const supabase = await createClient();
   await supabase.auth.signOut();
   redirect("/");
 }
