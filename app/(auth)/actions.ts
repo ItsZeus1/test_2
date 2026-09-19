@@ -13,7 +13,7 @@ export async function signUpAction(input: RegisterInput): Promise<ActionResult> 
   }
   const { name, username, email, password } = parsed.data;
 
-  const supabase = createClient();
+  const supabase = await createClient();
 
   const { data: existing } = await supabase
     .from("profiles")
