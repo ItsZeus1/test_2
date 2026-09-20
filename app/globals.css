@@ -1,0 +1,42 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --font-space-grotesk: "Space Grotesk", sans-serif;
+  --font-inter: "Inter", sans-serif;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  background-color: #0e1220;
+  color: #edebf5;
+  font-family: var(--font-inter);
+}
+
+.font-tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Visible keyboard focus everywhere — accessibility floor */
+:focus-visible {
+  outline: 2px solid #ff6b4a;
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* Hairline divider used throughout instead of card shadows */
+.hairline {
+  border-color: #2a3050;
+}
