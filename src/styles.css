@@ -1,0 +1,185 @@
+@import "tailwindcss";
+@import "@fontsource/outfit/latin-400.css";
+@import "@fontsource/outfit/latin-500.css";
+@import "@fontsource/outfit/latin-600.css";
+@import "@fontsource/outfit/latin-700.css";
+@import "@fontsource/syne/latin-700.css";
+@import "@fontsource/syne/latin-800.css";
+@import "@fontsource/cairo/arabic-400.css";
+@import "@fontsource/cairo/arabic-600.css";
+@import "@fontsource/cairo/arabic-700.css";
+@import "@fontsource/tajawal/arabic-500.css";
+@import "@fontsource/tajawal/arabic-700.css";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme {
+  --color-ink: #07080d;
+  --color-ink-soft: #0b0d17;
+  --color-fg: #f6f3ff;
+  --color-muted: #a89fbe;
+  --color-violet: #8b5cf6;
+  --color-fuchsia: #e879f9;
+  --color-indigo: #6366f1;
+  --font-sans: "Outfit", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Syne", "Outfit", ui-sans-serif, sans-serif;
+  --radius-card: 1.25rem;
+}
+
+@layer base {
+  html {
+    color-scheme: dark;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  body {
+    margin: 0;
+    min-height: 100vh;
+    overflow-x: hidden;
+    background: var(--color-ink);
+    color: var(--color-fg);
+    font-family: "Outfit", "Cairo", "Tajawal", "Segoe UI", Tahoma, sans-serif;
+  }
+
+  html[dir="rtl"] body,
+  html[dir="rtl"] .font-display {
+    font-family: "Cairo", "Tajawal", "Outfit", sans-serif;
+    letter-spacing: 0;
+  }
+
+  html[dir="rtl"] body * {
+    letter-spacing: 0;
+  }
+
+  button:not(:disabled),
+  [role="button"]:not(:disabled) {
+    cursor: pointer;
+  }
+
+  ::selection {
+    background: rgb(139 92 246 / 0.45);
+    color: white;
+  }
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: #07080d;
+}
+::-webkit-scrollbar-thumb {
+  background: #3a3358;
+  border-radius: 99px;
+  border: 2px solid #07080d;
+}
+
+.text-gradient {
+  background-image: linear-gradient(to bottom right, #ffffff, #e2e8f0 45%, #c4b5fd);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.glass {
+  background: rgb(255 255 255 / 0.04);
+  border: 1px solid rgb(255 255 255 / 0.08);
+  box-shadow: 0 8px 32px rgb(0 0 0 / 0.45);
+  backdrop-filter: blur(24px);
+}
+
+.btn-glow {
+  background-image: linear-gradient(90deg, #7c3aed, #d946ef, #4f46e5);
+  color: white;
+  box-shadow: 0 10px 30px -10px rgb(139 92 246 / 0.85);
+}
+
+.btn-glow:hover {
+  filter: brightness(1.08);
+}
+
+.field {
+  width: 100%;
+  border-radius: 0.9rem;
+  border: 1px solid rgb(255 255 255 / 0.1);
+  background: rgb(255 255 255 / 0.04);
+  color: var(--color-fg);
+  padding: 0.8rem 0.95rem;
+  outline: none;
+  transition: border-color 180ms ease, box-shadow 180ms ease;
+}
+
+.field::placeholder {
+  color: rgb(168 159 190 / 0.7);
+}
+
+.field:focus {
+  border-color: rgb(167 139 250 / 0.75);
+  box-shadow: 0 0 0 4px rgb(139 92 246 / 0.16);
+}
+
+.tilt-wrap {
+  perspective: 900px;
+}
+
+.tilt-card {
+  transform-style: preserve-3d;
+  transition:
+    transform 280ms ease,
+    border-color 280ms ease,
+    box-shadow 280ms ease;
+}
+
+.tilt-card:hover {
+  transform: translateY(-6px) rotateX(4deg) rotateY(-6deg);
+  border-color: rgb(139 92 246 / 0.6);
+  box-shadow: 0 0 25px -5px rgb(139 92 246 / 0.4);
+}
+
+.float-y {
+  animation: float-y 6s ease-in-out infinite;
+}
+
+.float-delay {
+  animation-delay: -2s;
+}
+
+.pulse-dot {
+  animation: pulse-dot 1.6s ease-in-out infinite;
+}
+
+@keyframes float-y {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-10px);
+  }
+}
+
+@keyframes pulse-dot {
+  0%,
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+  50% {
+    transform: scale(0.7);
+    opacity: 0.55;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .float-y,
+  .pulse-dot,
+  .tilt-card {
+    animation: none;
+    transition: none;
+  }
+
+  .tilt-card:hover {
+    transform: none;
+  }
+}
