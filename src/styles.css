@@ -1,0 +1,358 @@
+@import "tailwindcss";
+@import "@fontsource/outfit/latin-400.css";
+@import "@fontsource/outfit/latin-500.css";
+@import "@fontsource/outfit/latin-600.css";
+@import "@fontsource/outfit/latin-700.css";
+@import "@fontsource/syne/latin-700.css";
+@import "@fontsource/syne/latin-800.css";
+@import "@fontsource/cairo/arabic-400.css";
+@import "@fontsource/cairo/arabic-600.css";
+@import "@fontsource/cairo/arabic-700.css";
+@import "@fontsource/tajawal/arabic-500.css";
+@import "@fontsource/tajawal/arabic-700.css";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+/*
+ * NovaCharge design tokens. Light is the default; .dark on <html> switches.
+ * Components were authored with white-alpha utilities (bg-white/5, text-white),
+ * so --color-white is remapped to deep slate in light mode to keep them legible.
+ */
+@theme inline {
+  --color-ink: var(--nc-ink);
+  --color-ink-soft: var(--nc-ink-soft);
+  --color-fg: var(--nc-fg);
+  --color-muted: var(--nc-muted);
+  --color-violet: var(--nc-violet);
+  --color-fuchsia: var(--nc-fuchsia);
+  --color-indigo: var(--nc-indigo);
+  --color-emerald: var(--nc-emerald);
+  --font-sans: "Outfit", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Syne", "Outfit", ui-sans-serif, sans-serif;
+  --radius-card: 1.25rem;
+}
+
+:root,
+:root.light {
+  color-scheme: light;
+  --nc-ink: oklch(0.984 0.003 247.858); /* #F8FAFC */
+  --nc-ink-soft: oklch(0.968 0.007 247.896); /* #F1F5F9 */
+  --nc-card: oklch(1 0 0);
+  --nc-fg: oklch(0.208 0.042 265.755); /* #0F172A */
+  --nc-muted: oklch(0.446 0.043 257.281);
+  --nc-border: oklch(0.929 0.013 255.508); /* #E2E8F0 */
+  --nc-violet: oklch(0.541 0.247 293.009);
+  --nc-fuchsia: oklch(0.591 0.256 322.896);
+  --nc-indigo: oklch(0.511 0.262 276.966);
+  --nc-emerald: oklch(0.596 0.145 163.225);
+  --color-white: oklch(0.208 0.042 265.755);
+  --color-fuchsia-100: oklch(0.452 0.211 324.591);
+  --color-violet-100: oklch(0.432 0.232 292.759);
+  --color-rose-100: oklch(0.514 0.222 16.935);
+  --color-rose-200: oklch(0.514 0.222 16.935);
+  --color-amber-100: oklch(0.555 0.163 48.998);
+  --color-emerald-100: oklch(0.508 0.118 165.612);
+  --nc-shadow: 0 10px 30px -10px rgb(15 23 42 / 0.08), 0 1px 2px rgb(15 23 42 / 0.04);
+  --nc-shadow-lg: 0 24px 60px -24px rgb(15 23 42 / 0.18);
+  --nc-aura: radial-gradient(ellipse at top, rgb(99 102 241 / 0.10), transparent 55%);
+  --nc-hero: radial-gradient(circle at 12% 15%, rgb(217 70 239 / 0.12), transparent 40%),
+    radial-gradient(circle at 92% 0%, rgb(99 102 241 / 0.14), transparent 45%),
+    linear-gradient(160deg, #ffffff, #f8fafc 70%);
+  --nc-text-gradient: linear-gradient(120deg, #0f172a 10%, #4f46e5 55%, #c026d3);
+  --nc-scroll-track: #f1f5f9;
+  --nc-scroll-thumb: #cbd5e1;
+}
+
+:root.dark {
+  color-scheme: dark;
+  --nc-ink: oklch(0.145 0.012 280);
+  --nc-ink-soft: oklch(0.18 0.02 280);
+  --nc-card: oklch(1 0 0 / 0.04);
+  --nc-fg: oklch(0.97 0.012 300);
+  --nc-muted: oklch(0.72 0.04 295);
+  --nc-border: oklch(1 0 0 / 0.08);
+  --nc-violet: oklch(0.606 0.25 292.717);
+  --nc-fuchsia: oklch(0.746 0.2 322);
+  --nc-indigo: oklch(0.585 0.233 277.117);
+  --nc-emerald: oklch(0.765 0.177 163.223);
+  --color-white: #fff;
+  --nc-shadow: 0 8px 32px rgb(0 0 0 / 0.45);
+  --nc-shadow-lg: 0 24px 80px -24px rgb(139 92 246 / 0.6);
+  --nc-aura: radial-gradient(ellipse at top, rgb(124 58 237 / 0.28), transparent 55%);
+  --nc-hero: radial-gradient(circle at 15% 20%, rgb(232 121 249 / 0.4), transparent 36%),
+    radial-gradient(circle at 90% 0%, rgb(99 102 241 / 0.45), transparent 42%),
+    linear-gradient(145deg, #140a24, #07080d 62%);
+  --nc-text-gradient: linear-gradient(to bottom right, #ffffff, #e2e8f0 45%, #c4b5fd);
+  --nc-scroll-track: #07080d;
+  --nc-scroll-thumb: #3a3358;
+}
+
+@layer base {
+  html {
+    -webkit-font-smoothing: antialiased;
+    overflow-x: hidden;
+  }
+
+  body {
+    margin: 0;
+    min-height: 100vh;
+    overflow-x: hidden;
+    background: var(--color-ink);
+    color: var(--color-fg);
+    font-family: "Outfit", "Cairo", "Tajawal", "Segoe UI", Tahoma, sans-serif;
+    transition: background-color 200ms ease, color 200ms ease;
+  }
+
+  html[dir="rtl"] body,
+  html[dir="rtl"] .font-display {
+    font-family: "Cairo", "Tajawal", "Outfit", sans-serif;
+    letter-spacing: 0;
+  }
+
+  html[dir="rtl"] body * {
+    letter-spacing: 0;
+  }
+
+  img,
+  video {
+    max-width: 100%;
+  }
+
+  button:not(:disabled),
+  [role="button"]:not(:disabled) {
+    cursor: pointer;
+  }
+
+  ::selection {
+    background: color-mix(in oklab, var(--nc-violet) 35%, transparent);
+  }
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: var(--nc-scroll-track);
+}
+::-webkit-scrollbar-thumb {
+  background: var(--nc-scroll-thumb);
+  border-radius: 99px;
+  border: 2px solid var(--nc-scroll-track);
+}
+
+.text-gradient {
+  background-image: var(--nc-text-gradient);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.glass {
+  background: var(--nc-card);
+  border: 1px solid var(--nc-border);
+  box-shadow: var(--nc-shadow);
+  backdrop-filter: blur(24px);
+}
+
+.app-aura {
+  background: var(--nc-aura);
+}
+
+.hero-surface {
+  background: var(--nc-hero);
+  border: 1px solid var(--nc-border);
+  box-shadow: var(--nc-shadow-lg);
+}
+
+.hero-glow {
+  background: radial-gradient(circle, color-mix(in oklab, var(--nc-violet) 30%, transparent), transparent 68%);
+}
+
+.icon-tile {
+  background-image: linear-gradient(135deg, var(--nc-violet), var(--nc-fuchsia) 60%, var(--nc-indigo));
+  color: #fff;
+  box-shadow: 0 10px 24px -12px var(--nc-violet);
+}
+
+.card-active {
+  border-color: var(--nc-violet);
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--nc-violet) 18%, transparent), var(--nc-shadow);
+}
+
+.seg-active {
+  background-image: linear-gradient(90deg, var(--nc-violet), var(--nc-indigo));
+  color: #fff;
+  box-shadow: 0 6px 18px -8px var(--nc-violet);
+}
+
+.btn-glow {
+  background-image: linear-gradient(90deg, #7c3aed, #d946ef, #4f46e5);
+  color: #fff;
+  box-shadow: 0 10px 30px -12px rgb(124 58 237 / 0.7);
+}
+
+.btn-glow:hover {
+  filter: brightness(1.08);
+}
+
+.field {
+  width: 100%;
+  border-radius: 0.9rem;
+  border: 1px solid var(--nc-border);
+  background: var(--nc-card);
+  color: var(--color-fg);
+  padding: 0.8rem 0.95rem;
+  outline: none;
+  transition: border-color 180ms ease, box-shadow 180ms ease;
+}
+
+.field::placeholder {
+  color: color-mix(in oklab, var(--nc-muted) 75%, transparent);
+}
+
+.field:focus {
+  border-color: var(--nc-violet);
+  box-shadow: 0 0 0 4px color-mix(in oklab, var(--nc-violet) 16%, transparent);
+}
+
+select.field option {
+  background: var(--nc-ink);
+  color: var(--nc-fg);
+}
+
+/* Live offers TV ticker */
+.ticker-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  overflow: hidden;
+  border-radius: 9999px;
+  border: 1px solid var(--nc-border);
+  background: var(--nc-card);
+  box-shadow: var(--nc-shadow);
+  padding: 0.35rem;
+  min-height: 3rem;
+}
+
+.ticker-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  border-radius: 9999px;
+  padding: 0.5rem 0.9rem;
+  font-size: 0.75rem;
+  font-weight: 800;
+  white-space: nowrap;
+  color: #fff;
+  background-image: linear-gradient(90deg, #ef4444, #f97316);
+  box-shadow: 0 6px 18px -8px rgb(239 68 68 / 0.8);
+}
+
+.ticker-viewport {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  mask-image: linear-gradient(90deg, transparent, #000 6%, #000 94%, transparent);
+}
+
+.ticker-track {
+  display: flex;
+  width: max-content;
+  animation: marquee 32s linear infinite;
+}
+
+.ticker-track.ticker-rtl {
+  animation-name: marquee;
+}
+
+.ticker-bar:hover .ticker-track,
+.ticker-bar:active .ticker-track,
+.ticker-bar:focus-within .ticker-track {
+  animation-play-state: paused;
+}
+
+.ticker-item {
+  flex-shrink: 0;
+  padding-inline: 2rem;
+  white-space: nowrap;
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: var(--nc-fg);
+}
+
+@keyframes marquee {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(-50%);
+  }
+}
+
+.tilt-wrap {
+  perspective: 900px;
+}
+
+.tilt-card {
+  transform-style: preserve-3d;
+  transition:
+    transform 280ms ease,
+    border-color 280ms ease,
+    box-shadow 280ms ease;
+}
+
+.tilt-card:hover {
+  transform: translateY(-4px);
+  border-color: color-mix(in oklab, var(--nc-violet) 55%, transparent);
+  box-shadow: 0 18px 40px -18px color-mix(in oklab, var(--nc-violet) 45%, transparent);
+}
+
+.float-y {
+  animation: float-y 6s ease-in-out infinite;
+}
+
+.float-delay {
+  animation-delay: -2s;
+}
+
+.pulse-dot {
+  animation: pulse-dot 1.6s ease-in-out infinite;
+}
+
+@keyframes float-y {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-10px);
+  }
+}
+
+@keyframes pulse-dot {
+  0%,
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+  50% {
+    transform: scale(0.7);
+    opacity: 0.55;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .float-y,
+  .pulse-dot,
+  .ticker-track,
+  .tilt-card {
+    animation: none;
+    transition: none;
+  }
+
+  .tilt-card:hover {
+    transform: none;
+  }
+}
