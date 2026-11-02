@@ -3,8 +3,7 @@ import { createFileRoute, Link } from "@tanstack/react-router";
 
 import { useProfileState } from "@/components/profile";
 import { listMyOrders, onStoreChange } from "@/lib/store/api";
-import { formatMoney } from "@/lib/money";
-import { orderStatusText, useI18n } from "@/lib/i18n";
+import { orderStatusText, useI18n, useMoney } from "@/lib/i18n";
 import type { OrderRow } from "@/lib/store/types";
 
 export const Route = createFileRoute("/orders")({
@@ -15,6 +14,7 @@ export const Route = createFileRoute("/orders")({
 function OrdersPage() {
   const { profile, ready } = useProfileState();
   const { t } = useI18n();
+  const money = useMoney();
   const [orders, setOrders] = useState<OrderRow[]>([]);
 
   useEffect(() => {
@@ -50,7 +50,7 @@ function OrdersPage() {
       {profile && orders.length === 0 ? <p className="mt-6 text-muted">{t.noOrders}</p> : null}
       <div className="mt-6 grid gap-3">
         {orders.map((order) => (
-          <article key={order.id} className="glass rounded-3xl p-4">
+          <article key={order.id} className="nova-grid-border glass rounded-3xl p-4">
             <div className="flex items-start justify-between gap-3">
               <div>
                 <p className="font-semibold">{order.serviceName}</p>
@@ -58,7 +58,7 @@ function OrdersPage() {
                   {order.packageName} · {order.targetId}
                 </p>
               </div>
-              <p className="font-bold tabular-nums">{formatMoney(order.priceCents, order.currency)}</p>
+              <p className="font-bold tabular-nums">{money(order.priceCents, order.currency)}</p>
             </div>
             <p className="mt-2 text-xs text-violet">
               {order.fulfillmentRef} · {orderStatusText(t, order.status)}

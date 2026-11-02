@@ -5,14 +5,15 @@ import { toast } from "sonner";
 
 import { ServiceMark } from "@/components/service-mark";
 import { useProfileState } from "@/components/profile";
-import { categoryName, orderStatusText, serviceText, useI18n } from "@/lib/i18n";
+import { categoryName, orderStatusText, serviceText, useI18n, useMoney } from "@/lib/i18n";
 import { getPublicService, getViewerService, purchase } from "@/lib/store/api";
-import { formatMoney } from "@/lib/money";
 import { useNovaUi } from "@/lib/ui-store";
 import { type PublicPackage, type ServiceDetail } from "@/lib/store/types";
 
 export function ServiceCheckout({ slug }: { slug: string }) {
   const { language, t } = useI18n();
+  const money = useMoney();
+  const previewCurrency = useNovaUi((state) => state.previewCurrency);
   const navigate = useNavigate();
   const { profile, setProfile } = useProfileState();
   const openSelfTopUp = useNovaUi((state) => state.openSelfTopUp);
@@ -30,7 +31,7 @@ export function ServiceCheckout({ slug }: { slug: string }) {
     setLoading(true);
     void (async () => {
       try {
-        const detail = profile ? await getViewerService({ slug }) : await getPublicService({ slug });
+        const detail = profile ? await getViewerService({ slug }) : await getPublicService({ slug, currency: previewCurrency });
         if (cancel) return;
         setService(detail);
         setError(detail ? null : t.notInCatalog);
@@ -43,7 +44,7 @@ export function ServiceCheckout({ slug }: { slug: string }) {
     return () => {
       cancel = true;
     };
-  }, [slug, profile?.role, profile?.userId, profile?.currency]);
+  }, [slug, profile?.role, profile?.userId, previewCurrency]);
 
   async function confirmPurchase() {
     if (!buying) return;
@@ -104,7 +105,7 @@ export function ServiceCheckout({ slug }: { slug: string }) {
             </h1>
             <p className="mt-3 max-w-xl text-sm text-muted">{copy.description}</p>
             <p className="mt-4 text-sm">
-              {t.from} <span className="font-display text-2xl font-extrabold tabular-nums">{formatMoney(service.startingPriceCents, service.currency, language)}</span>
+              {t.from} <span className="font-display text-2xl font-extrabold tabular-nums">{money(service.startingPriceCents, service.currency)}</span>
               {vip ? (
                 <span className="ms-2 rounded-full border border-amber-200/50 bg-amber-300/15 px-2.5 py-1 text-[10px] font-bold tracking-[0.16em] text-amber-100">
                   VIP
@@ -119,7 +120,7 @@ export function ServiceCheckout({ slug }: { slug: string }) {
       {receipt ? (
         <p className="glass mt-4 rounded-2xl px-4 py-3 text-sm">
           #<span className="font-semibold">{receipt.ref}</span> {t.orderIs} {orderStatusText(t, receipt.status)}. {t.walletNow}{" "}
-          <span className="font-semibold tabular-nums">{profile ? formatMoney(profile.balanceCents, profile.currency, language) : t.updated}</span>.
+          <span className="font-semibold tabular-nums">{profile ? money(profile.balanceCents, profile.currency) : t.updated}</span>.
         </p>
       ) : null}
 
@@ -128,11 +129,11 @@ export function ServiceCheckout({ slug }: { slug: string }) {
         {service.packages.map((pack) => {
           const short = profile ? profile.balanceCents < pack.priceCents : false;
           return (
-            <div key={pack.id} className="glass nova-grid-border flex flex-col gap-3 rounded-3xl p-4 sm:flex-row sm:items-center">
+            <div key={pack.id} className="nova-grid-border glass flex min-w-0 flex-col gap-3 rounded-3xl p-4 sm:flex-row sm:items-center">
               <div className="min-w-0 flex-1">
                 <p className="font-display text-xl font-extrabold">{pack.sizeName}</p>
                 <p className="mt-1 text-sm">
-                  <span className="tabular-nums font-semibold">{formatMoney(pack.priceCents, pack.currency, language)}</span>
+                  <span className="tabular-nums font-semibold">{money(pack.priceCents, service.currency)}</span>
                   {pack.rate === "vip" ? (
                     <span className="ms-2 rounded-full border border-amber-200/40 bg-amber-300/10 px-2 py-0.5 text-[10px] font-bold tracking-[0.14em] text-amber-100">
                       VIP
@@ -173,7 +174,7 @@ export function ServiceCheckout({ slug }: { slug: string }) {
             role="dialog"
             aria-modal="true"
             aria-labelledby="buy-title"
-            className="glass nova-grid-border w-full max-w-md rounded-[1.75rem] border border-violet/30 p-5 shadow-[0_0_40px_-12px_rgba(139,92,246,0.9)]"
+            className="nova-grid-border glass w-full max-w-md rounded-[1.75rem] border border-violet/30 p-5 shadow-[0_0_40px_-12px_rgba(139,92,246,0.9)]"
           >
             <div className="flex items-start justify-between gap-3">
               <div>
@@ -182,7 +183,7 @@ export function ServiceCheckout({ slug }: { slug: string }) {
                   {buying.sizeName}
                 </h3>
                 <p className="mt-1 text-sm tabular-nums">
-                  {formatMoney(buying.priceCents, buying.currency, language)}
+                  {money(buying.priceCents, service.currency)}
                   {buying.rate === "vip" ? <span className="ms-2 text-amber-100">VIP</span> : null}
                 </p>
               </div>
@@ -204,7 +205,7 @@ export function ServiceCheckout({ slug }: { slug: string }) {
             {formError ? <p className="mt-3 text-sm text-rose-200">{formError}</p> : null}
             {profile && profile.balanceCents < buying.priceCents ? (
               <button type="button" onClick={openSelfTopUp} className="mt-3 text-sm font-semibold text-fuchsia">
-                {t.walletIs} {formatMoney(profile.balanceCents, profile.currency, language)}. {t.topUpFirst}
+                {t.walletIs} {money(profile.balanceCents, profile.currency)}. {t.topUpFirst}
               </button>
             ) : null}
             <button

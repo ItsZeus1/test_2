@@ -1,89 +1,59 @@
 import type { Currency } from "@/lib/store/types";
 
-/** Default New Syrian Pounds per 1 USD. Admin overrides it in Store settings. */
-export const DEFAULT_SYP_RATE = 120;
-const PREVIEW_KEY = "novacharge.currency.v1";
+export const CURRENCIES: Currency[] = ["USD", "SYP"];
+/** Placeholder default (SYP per 1 USD). The admin sets the real rate in the dashboard. */
+export const DEFAULT_SYP_RATE = 110;
 
-function docLang(): "ar" | "en" {
-  if (typeof document === "undefined") return "en";
-  return document.documentElement.lang === "ar" ? "ar" : "en";
+export function isCurrency(value: unknown): value is Currency {
+  return value === "USD" || value === "SYP";
+}
+
+/** `minor` is cents for USD and qirsh (1/100 pound) for SYP. */
+export function formatMoney(minor: number, currency: Currency = "USD", language: "ar" | "en" = "en"): string {
+  const amount = minor / 100;
+  if (currency === "SYP") {
+    const number = new Intl.NumberFormat(language === "ar" ? "ar-SY-u-nu-latn" : "en-US", {
+      maximumFractionDigits: Number.isInteger(amount) ? 0 : 2,
+    }).format(amount);
+    return language === "ar" ? `${number} ل.س` : `${number} SYP`;
+  }
+  return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(amount);
 }
 
 export function formatUsd(cents: number): string {
-  return new Intl.NumberFormat("en-US", {
-    style: "currency",
-    currency: "USD",
-  }).format(cents / 100);
+  return formatMoney(cents, "USD");
 }
 
-/** New Syrian Pound. Whole pounds unless the amount has piastres. */
-export function formatSyp(cents: number, lang: "ar" | "en" = docLang()): string {
-  const value = cents / 100;
-  const whole = Number.isInteger(value);
-  const number = new Intl.NumberFormat("en-US", {
-    minimumFractionDigits: whole ? 0 : 2,
-    maximumFractionDigits: 2,
-  }).format(value);
-  return lang === "ar" ? `${number} ل.س` : `${number} SYP`;
+export function currencyName(currency: Currency, language: "ar" | "en"): string {
+  if (currency === "SYP") return language === "ar" ? "الليرة السورية الجديدة (ل.س)" : "New Syrian Pound (SYP)";
+  return language === "ar" ? "الدولار الأمريكي ($)" : "US Dollar (USD)";
 }
 
-export function formatMoney(cents: number, currency: Currency = "USD", lang?: "ar" | "en"): string {
-  return currency === "SYP" ? formatSyp(cents, lang) : formatUsd(cents);
+export function currencyCode(currency: Currency, language: "ar" | "en"): string {
+  return currency === "SYP" ? (language === "ar" ? "ل.س" : "SYP") : "$";
 }
 
-export function currencySymbol(currency: Currency, lang: "ar" | "en" = docLang()): string {
-  if (currency === "USD") return "$";
-  return lang === "ar" ? "ل.س" : "SYP";
-}
-
-export function currencyLabel(currency: Currency, lang: "ar" | "en" = docLang()): string {
-  if (currency === "USD") return lang === "ar" ? "الدولار الأمريكي (USD $)" : "US Dollar (USD $)";
-  return lang === "ar" ? "الليرة السورية الجديدة (SYP ل.س)" : "New Syrian Pound (SYP ل.س)";
-}
-
-/** Parses "12", "12.5", "1200.00" into minor units. Works for USD and SYP. */
+/** Parses "12.50" into minor units. Same rule for both currencies. */
 export function dollarsToCents(value: string): number | null {
-  const trimmed = value.trim().replace(/,/g, "");
+  const trimmed = value.trim();
   if (!/^\d+(\.\d{1,2})?$/.test(trimmed)) return null;
   const cents = Math.round(Number(trimmed) * 100);
   if (!Number.isFinite(cents) || cents < 0) return null;
   return cents;
 }
 
-export const amountToCents = dollarsToCents;
+export const amountToMinor = dollarsToCents;
 
-export function centsToField(cents: number): string {
-  if (!cents) return "";
-  const value = cents / 100;
-  return Number.isInteger(value) ? String(value) : value.toFixed(2);
+export function minorToField(minor: number): string {
+  return (minor / 100).toFixed(2);
 }
 
-/** USD cents -> SYP minor units, rounded to whole pounds. */
-export function usdToSypCents(usdCents: number, rate: number): number {
-  const safe = Number.isFinite(rate) && rate > 0 ? rate : DEFAULT_SYP_RATE;
-  return Math.round((usdCents * safe) / 100) * 100;
+/** USD cents -> SYP minor units, rounded to a whole pound. */
+export function sypFromUsd(usdCents: number, rate: number): number {
+  return Math.round((usdCents / 100) * rate) * 100;
 }
 
-/** Smallest amount accepted for top-ups and credits, per currency. */
-export function minTopUpCents(currency: Currency): number {
-  return currency === "SYP" ? 10_000 : 100;
-}
-
-// Visitor preview currency (logged-out users). Signed-in users always use their account currency.
-export function readPreviewCurrency(): Currency {
-  if (typeof window === "undefined") return "USD";
-  try {
-    return window.localStorage.getItem(PREVIEW_KEY) === "SYP" ? "SYP" : "USD";
-  } catch {
-    return "USD";
-  }
-}
-
-export function writePreviewCurrency(currency: Currency): void {
-  if (typeof window === "undefined") return;
-  try {
-    window.localStorage.setItem(PREVIEW_KEY, currency);
-  } catch {
-    /* private mode */
-  }
+/** Balance ceiling per currency (minor units). */
+export function balanceCap(currency: Currency): number {
+  return currency === "SYP" ? 200_000_000_000 : 2_000_000_000;
 }

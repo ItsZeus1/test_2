@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link } from "@tanstack/react-router";
 import { Pencil, Plus, Radio, Trash2 } from "lucide-react";
 import { toast } from "sonner";
@@ -6,23 +6,27 @@ import { toast } from "sonner";
 import { ServiceMark } from "@/components/service-mark";
 import { RoleBadge } from "@/components/role-badge";
 import { useProfileState } from "@/components/profile";
-import { useI18n } from "@/lib/i18n";
+import { useI18n, useMoney } from "@/lib/i18n";
 import {
   approveBalanceRequest,
   deleteServiceAction,
-  fetchStoreState,
   getAdminDashboard,
+  getCloudWarning,
+  getSypRate,
+  setSypRate,
+  getShamcashAddress,
+  getViewerCatalog,
   listBalanceRequests,
   onStoreChange,
   rejectBalanceRequest,
   setShamcashAddress,
   setUserRole,
+  getOffersTicker,
   setOffersTicker,
-  setSypRate,
   toggleBlockUser,
   topUpUser,
 } from "@/lib/store/api";
-import { DEFAULT_SYP_RATE, dollarsToCents, formatMoney, formatSyp, formatUsd, minTopUpCents } from "@/lib/money";
+import { currencyCode, DEFAULT_SYP_RATE, dollarsToCents } from "@/lib/money";
 import type { StoredBalanceRequest } from "@/lib/store/data";
 import { useNovaUi } from "@/lib/ui-store";
 import {
@@ -37,7 +41,8 @@ const ROLES: Role[] = ["NORMAL", "VIP"];
 const OWNER_EMAIL = "majd@elmadani.com";
 
 export function AdminDashboard() {
-  const { language, t } = useI18n();
+  const { t, language } = useI18n();
+  const money = useMoney();
   const { profile, ready } = useProfileState();
   const openCreateService = useNovaUi((state) => state.openCreateService);
   const openEditService = useNovaUi((state) => state.openEditService);
@@ -52,8 +57,8 @@ export function AdminDashboard() {
   const [ticker, setTicker] = useState("");
   const [tickerAr, setTickerAr] = useState("");
   const [requests, setRequests] = useState<StoredBalanceRequest[]>([]);
+  const rateEdited = useRef(false);
   const [rate, setRate] = useState(String(DEFAULT_SYP_RATE));
-  const [dbOnline, setDbOnline] = useState(false);
 
   useEffect(() => {
     if (!ready || profile?.role !== "ADMIN") {
@@ -63,11 +68,13 @@ export function AdminDashboard() {
     let cancel = false;
     async function load() {
       try {
-        // fetchStoreState reads catalog + settings fresh from the online database.
-        const [dash, store, queue] = await Promise.all([
+        const [dash, catalog, sham, queue, offers, sypRate] = await Promise.all([
           getAdminDashboard(),
-          fetchStoreState(),
+          getViewerCatalog(),
+          getShamcashAddress(),
           listBalanceRequests().catch(() => [] as StoredBalanceRequest[]),
+          getOffersTicker(),
+          getSypRate(),
         ]);
         if (cancel) return;
         if (!dash.ok) {
@@ -77,13 +84,12 @@ export function AdminDashboard() {
         }
         setStats(dash.stats);
         setUsers(dash.users);
-        setServices(store.services);
-        setDbOnline(store.online);
-        setAddress(store.settings.shamcashAddress);
-        setTicker(store.settings.offersTickerText ?? "");
-        setTickerAr(store.settings.offersTickerTextAr ?? "");
-        setRate(String(store.settings.sypRate));
+        setServices(catalog);
+        setAddress(sham);
+        setTicker(offers.text);
+        setTickerAr(offers.textAr);
         setRequests(queue);
+        setRate((current) => (rateEdited.current ? current : String(sypRate)));
         setError(null);
       } catch (caught) {
         if (!cancel) setError(caught instanceof Error ? caught.message : t.catalogError);
@@ -121,6 +127,11 @@ export function AdminDashboard() {
     );
   }
 
+  function warnIfLocal() {
+    const warning = getCloudWarning();
+    if (warning) toast.warning(warning);
+  }
+
   async function block(user: AdminUser) {
     const result = await toggleBlockUser({ userId: user.userId });
     if (!result.ok) toast.error(result.error);
@@ -131,13 +142,13 @@ export function AdminDashboard() {
     const result = await setUserRole({ userId, role });
     if (!result.ok) toast.error(result.error);
     else toast.success(`${t.roleSet} ${role}`);
+    warnIfLocal();
   }
 
   async function credit(user: AdminUser) {
     const cents = dollarsToCents(credits[user.userId] ?? "");
-    const min = minTopUpCents(user.currency);
-    if (cents == null || cents < min) {
-      toast.error(`${t.minAmount} ${formatMoney(min, user.currency, language)}`);
+    if (cents == null || cents < 100) {
+      toast.error(t.minDollar);
       return;
     }
     const result = await topUpUser({ userId: user.userId, cents });
@@ -146,7 +157,8 @@ export function AdminDashboard() {
       return;
     }
     setCredits((current) => ({ ...current, [user.userId]: "" }));
-    toast.success(`${t.added} ${formatMoney(cents, user.currency, language)} · ${user.name}`);
+    toast.success(`${t.added} ${money(cents, user.currency)} · ${user.name}`);
+    warnIfLocal();
   }
 
   async function remove(slug: string) {
@@ -157,6 +169,7 @@ export function AdminDashboard() {
     }
     setPendingSlug(null);
     toast.success(t.removed);
+    warnIfLocal();
   }
 
   async function saveAddress() {
@@ -166,6 +179,7 @@ export function AdminDashboard() {
       return;
     }
     toast.success(t.shamSaved);
+    warnIfLocal();
   }
 
   async function saveTicker() {
@@ -175,20 +189,19 @@ export function AdminDashboard() {
       return;
     }
     toast.success(t.tickerSaved);
+    warnIfLocal();
   }
 
   async function saveRate() {
-    const value = Number(rate.replace(/,/g, ""));
-    if (!Number.isFinite(value) || value <= 0) {
-      toast.error(t.sypRateHint);
-      return;
-    }
+    const value = Number(rate);
     const result = await setSypRate({ rate: value });
     if (!result.ok) {
       toast.error(result.error);
       return;
     }
-    toast.success(t.rateSaved);
+    rateEdited.current = false;
+    toast.success(t.sypRateSaved);
+    warnIfLocal();
   }
 
   async function decide(id: string, action: "approve" | "reject") {
@@ -208,21 +221,40 @@ export function AdminDashboard() {
       <h1 className="mt-2 font-display text-2xl font-extrabold sm:text-4xl lg:text-5xl">
         <span className="text-gradient">{t.adminTitle}</span>
       </h1>
-      <p className={`mt-2 inline-flex items-center gap-2 text-xs font-semibold ${dbOnline ? "text-emerald-100" : "text-amber-100"}`}>
-        <span className={`size-2 rounded-full ${dbOnline ? "bg-emerald-400" : "bg-amber-400"}`} />
-        {dbOnline ? t.dbLive : t.dbLocal}
-      </p>
 
       {error ? <p className="mt-4 text-sm text-rose-200">{error}</p> : null}
 
-      <section className="mt-6 grid grid-cols-2 gap-3 lg:grid-cols-4">
+      <section className="mt-6 grid gap-3 sm:grid-cols-3">
         <Kpi label={t.online} value={String(stats?.onlineSessions ?? 0)} live />
         <Kpi label={t.slugsAdded} value={String(stats?.serviceCount ?? 0)} />
-        <Kpi label={t.income} value={formatUsd(stats?.revenueCents ?? 0)} />
-        <Kpi label={t.incomeSyp} value={formatSyp(stats?.revenueSypCents ?? 0, language)} />
+        <Kpi label={`${t.income} · ${t.incomeNote}`} value={money(stats?.revenueCents ?? 0, "USD")} />
       </section>
 
-      <section className="glass nova-grid-border mt-6 rounded-[1.75rem] p-4 sm:p-5">
+      <section className="nova-grid-border glass mt-6 rounded-[1.75rem] p-4 sm:p-5">
+        <h2 className="font-display text-xl font-extrabold">{t.sypRateTitle}</h2>
+        <p className="mt-1 text-sm text-muted">{t.sypRateHint}</p>
+        <div className="mt-4 flex flex-col gap-3 sm:flex-row sm:items-end">
+          <label className="block text-xs font-bold tracking-[0.14em] text-muted uppercase sm:max-w-xs sm:flex-1">
+            {t.sypRateLabel}
+            <input
+              className="field mt-2 font-normal tracking-normal normal-case"
+              dir="ltr"
+              inputMode="decimal"
+              value={rate}
+              onChange={(event) => {
+                rateEdited.current = true;
+                setRate(event.target.value);
+              }}
+            />
+          </label>
+          <button type="button" onClick={() => void saveRate()} className="btn-glow min-h-11 rounded-full px-5 text-sm font-semibold">
+            {t.sypRateSave}
+          </button>
+        </div>
+        <p className="mt-3 text-xs text-muted">{t.sypOverview}</p>
+      </section>
+
+      <section className="nova-grid-border glass mt-6 rounded-[1.75rem] p-4 sm:p-5">
         <div className="flex flex-wrap items-center gap-2">
           <span className="ticker-badge">
             <span className="pulse-dot size-2 rounded-full bg-current" />
@@ -256,31 +288,8 @@ export function AdminDashboard() {
         </button>
       </section>
 
-      <section className="mt-6 grid gap-4 lg:grid-cols-3">
-        <div className="glass nova-grid-border rounded-[1.75rem] p-4 sm:p-5">
-          <h2 className="font-display text-xl font-extrabold">{t.sypRateTitle}</h2>
-          <p className="mt-1 text-sm text-muted">{t.sypRateHint}</p>
-          <label className="mt-3 block text-xs font-bold tracking-[0.14em] text-muted uppercase">
-            1 USD =
-            <span className="mt-2 flex items-center gap-2">
-              <input
-                className="field font-normal tracking-normal normal-case"
-                dir="ltr"
-                inputMode="decimal"
-                value={rate}
-                onChange={(event) => setRate(event.target.value)}
-              />
-              <span className="shrink-0 text-sm normal-case">ل.س SYP</span>
-            </span>
-          </label>
-          <p className="mt-2 text-xs text-muted tabular-nums">
-            $10 → {formatSyp(Math.round(10 * (Number(rate) || 0)) * 100, language)}
-          </p>
-          <button type="button" onClick={() => void saveRate()} className="btn-glow mt-3 min-h-11 rounded-full px-4 text-sm font-semibold">
-            {t.saveRate}
-          </button>
-        </div>
-        <div className="glass nova-grid-border rounded-[1.75rem] p-4 sm:p-5">
+      <section className="mt-6 grid gap-4 lg:grid-cols-2">
+        <div className="nova-grid-border glass rounded-[1.75rem] p-4 sm:p-5">
           <h2 className="font-display text-xl font-extrabold">{t.shamSettings}</h2>
           <label className="mt-3 block text-xs font-bold tracking-[0.14em] text-muted uppercase">
             {t.shamcash}
@@ -295,7 +304,7 @@ export function AdminDashboard() {
             {t.shamSave}
           </button>
         </div>
-        <div className="glass nova-grid-border max-h-[28rem] overflow-hidden rounded-[1.75rem] p-4 sm:p-5">
+        <div className="nova-grid-border glass max-h-[28rem] overflow-hidden rounded-[1.75rem] p-4 sm:p-5">
           <h2 className="font-display text-xl font-extrabold">{t.queue}</h2>
           <div className="mt-3 h-[calc(100%-2.5rem)] space-y-2 overflow-y-auto pe-1">
             {processing.length === 0 ? (
@@ -305,7 +314,7 @@ export function AdminDashboard() {
                 <article key={item.id} className="rounded-2xl border border-white/10 bg-white/[0.03] px-3 py-2.5">
                   <div className="flex items-start justify-between gap-2">
                     <p className="font-semibold">@{item.username}</p>
-                    <p className="shrink-0 text-sm font-bold tabular-nums">{formatMoney(item.cents, item.currency, language)}</p>
+                    <p className="shrink-0 text-sm font-bold tabular-nums">{money(item.cents, item.currency ?? "USD")}</p>
                   </div>
                   <p className="text-xs text-muted">
                     {t.reference}: <span dir="ltr">{item.referenceNote}</span>
@@ -326,7 +335,7 @@ export function AdminDashboard() {
       </section>
 
       <section className="mt-6 grid gap-4 lg:grid-cols-[minmax(0,22rem)_1fr]">
-        <div className="glass nova-grid-border aspect-square max-h-[28rem] overflow-hidden rounded-[1.75rem] p-4 sm:p-5">
+        <div className="nova-grid-border glass aspect-square max-h-[28rem] overflow-hidden rounded-[1.75rem] p-4 sm:p-5">
           <div className="flex items-center justify-between">
             <h2 className="font-display text-xl font-extrabold">{t.recent}</h2>
             <Radio className="size-4 text-fuchsia" />
@@ -339,7 +348,7 @@ export function AdminDashboard() {
                 <article key={order.id} className="rounded-2xl border border-white/10 bg-white/[0.03] px-3 py-2.5">
                   <div className="flex items-start justify-between gap-2">
                     <p className="font-semibold">{order.serviceName}</p>
-                    <p className="shrink-0 text-sm font-bold tabular-nums">{formatMoney(order.priceCents, order.currency, language)}</p>
+                    <p className="shrink-0 text-sm font-bold tabular-nums">{money(order.priceCents, order.currency)}</p>
                   </div>
                   <p className="text-xs text-muted">
                     {order.userName} · {order.packageName}
@@ -360,13 +369,12 @@ export function AdminDashboard() {
           </div>
           <div className="grid gap-2">
             {services.map((service) => (
-              <article key={service.id} className="glass nova-grid-border flex flex-col gap-3 rounded-2xl p-3 sm:flex-row sm:items-center">
+              <article key={service.id} className="nova-grid-border glass flex flex-col gap-3 rounded-2xl p-3 sm:flex-row sm:items-center">
                 <ServiceMark slug={service.slug} category={service.category} name={service.name} imageUrl={service.imageUrl} size="sm" />
                 <div className="min-w-0 flex-1">
                   <p className="truncate font-semibold">{service.name}</p>
                   <p className="text-xs text-muted">
-                    {categoryLabel(service.category)} · {service.slug} · from {formatUsd(service.startingPriceUsdCents)} /{" "}
-                    {formatSyp(service.startingPriceSypCents, language)}
+                    {categoryLabel(service.category)} · {service.slug} · from {money(service.startingPriceCents, "USD")}
                   </p>
                 </div>
                 <div className="flex gap-2">
@@ -393,12 +401,11 @@ export function AdminDashboard() {
         <h2 className="font-display text-2xl font-extrabold">{t.usersBalances}</h2>
         <div className="mt-3 grid gap-3">
           {users.map((user) => (
-            <article key={user.userId} className="glass nova-grid-border rounded-3xl p-4">
+            <article key={user.userId} className="nova-grid-border glass rounded-3xl p-4">
               <div className="flex flex-wrap items-center gap-2">
                 <p className="font-semibold">{user.name}</p>
                 <span className="text-sm text-muted">@{user.username}</span>
                 <RoleBadge role={user.role} />
-                <span className="rounded-full border border-white/10 px-2 py-1 text-[10px] font-bold tracking-wide">{user.currency}</span>
                 {user.isBlocked ? (
                   <span className="rounded-full border border-rose-300/40 px-2 py-1 text-[10px] font-bold tracking-wide text-rose-100 uppercase">
                     {t.blocked}
@@ -406,8 +413,7 @@ export function AdminDashboard() {
                 ) : null}
               </div>
               <p className="mt-1 text-sm text-muted">
-                {user.email} · <span className="font-semibold tabular-nums">{formatMoney(user.balanceCents, user.currency, language)}</span> ·{" "}
-                {user.lastIp || t.ipMissing}
+                {user.email} · {money(user.balanceCents, user.currency)} ({user.currency}) · {user.lastIp || t.ipMissing}
               </p>
               <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center">
                 {user.email.toLowerCase() === OWNER_EMAIL ? (
@@ -434,13 +440,12 @@ export function AdminDashboard() {
                 </label>
                 )}
                 <label className="text-xs font-bold tracking-[0.14em] text-muted uppercase sm:ml-auto">
-                  {t.topUpUser} ({user.currency})
-                  <span className="mt-1 flex gap-2">
+                  {t.topUpUser} ({currencyCode(user.currency, language)})
+                  <span className="mt-1 flex flex-wrap gap-2">
                     <input
                       className="field w-28"
-                      dir="ltr"
                       inputMode="decimal"
-                      placeholder={user.currency === "SYP" ? "1200" : "10.00"}
+                      placeholder={user.currency === "SYP" ? "5000" : "10.00"}
                       value={credits[user.userId] ?? ""}
                       onChange={(event) => setCredits((current) => ({ ...current, [user.userId]: event.target.value }))}
                     />
@@ -469,13 +474,13 @@ export function AdminDashboard() {
 
 function Kpi({ label, value, live = false }: { label: string; value: string; live?: boolean }) {
   return (
-    <article className="glass nova-grid-border relative overflow-hidden rounded-3xl p-5">
+    <article className="nova-grid-border glass relative overflow-hidden rounded-3xl p-5">
       <div className="pointer-events-none absolute -top-8 -right-6 h-24 w-24 rounded-full bg-[radial-gradient(circle,rgba(232,121,249,0.4),transparent_70%)]" />
       <p className="flex items-center gap-2 text-[11px] font-bold tracking-[0.16em] text-muted uppercase">
         {live ? <span className="pulse-dot size-2 rounded-full bg-emerald-400" /> : null}
         {label}
       </p>
-      <p className="mt-2 font-display text-2xl font-extrabold tabular-nums break-words sm:text-3xl">{value}</p>
+      <p className="mt-2 font-display text-3xl font-extrabold tabular-nums">{value}</p>
     </article>
   );
 }

@@ -3,22 +3,21 @@ import { Check, Copy, X } from "lucide-react";
 import { toast } from "sonner";
 
 import { useProfileState } from "@/components/profile";
-import { requestStatusText, useI18n } from "@/lib/i18n";
+import { requestStatusText, useI18n, useMoney } from "@/lib/i18n";
 import {
-  getAdminDashboard,
   getShamcashAddress,
   listMyBalanceRequests,
   submitBalanceRequest,
   topUpUser,
 } from "@/lib/store/api";
-import { dollarsToCents, formatMoney, minTopUpCents } from "@/lib/money";
-import type { BalanceRequest, Currency } from "@/lib/store/types";
+import { currencyCode, dollarsToCents } from "@/lib/money";
+import type { BalanceRequest } from "@/lib/store/types";
 import { useNovaUi } from "@/lib/ui-store";
 
-/** Quick-pick top-up amounts per wallet currency (minor units). */
-const PACKS: Record<Currency, number[]> = {
-  USD: [1000, 2500, 5000, 10000, 25000],
-  SYP: [100000, 250000, 500000, 1000000, 2500000],
+// Quick amounts in major units; the wallet currency decides the scale.
+const PACKS: Record<"USD" | "SYP", number[]> = {
+  USD: [10, 25, 50, 100, 250],
+  SYP: [1000, 2500, 5000, 10000, 25000],
 };
 
 async function copyText(value: string) {
@@ -38,7 +37,8 @@ async function copyText(value: string) {
 }
 
 export function TopUpModal() {
-  const { language, t } = useI18n();
+  const { t, language } = useI18n();
+  const money = useMoney();
   const topUp = useNovaUi((state) => state.topUp);
   const closeTopUp = useNovaUi((state) => state.closeTopUp);
   const { profile } = useProfileState();
@@ -50,7 +50,6 @@ export function TopUpModal() {
   const [copied, setCopied] = useState(false);
   const [mine, setMine] = useState<BalanceRequest[]>([]);
   const [error, setError] = useState<string | null>(null);
-  const [targetCurrency, setTargetCurrency] = useState<Currency>("USD");
 
   useEffect(() => {
     if (!topUp || topUp.mode !== "self") return;
@@ -65,24 +64,10 @@ export function TopUpModal() {
     };
   }, [topUp]);
 
-  useEffect(() => {
-    if (!topUp || topUp.mode !== "user") return;
-    let cancel = false;
-    void getAdminDashboard().then((result) => {
-      if (cancel || !result.ok) return;
-      const target = result.users.find((user) => user.userId === topUp.userId);
-      if (target) setTargetCurrency(target.currency);
-    });
-    return () => {
-      cancel = true;
-    };
-  }, [topUp]);
-
   if (!topUp) return null;
 
-  const currency: Currency = topUp.mode === "self" ? (profile?.currency ?? "USD") : targetCurrency;
-  const min = minTopUpCents(currency);
-  const money = (cents: number, code: Currency = currency) => formatMoney(cents, code, language);
+  const currency = topUp.mode === "self" ? (profile?.currency ?? "USD") : (topUp.currency ?? "USD");
+  const unit = currencyCode(currency, language);
 
   const amountCents = packCents ?? (custom.trim() ? dollarsToCents(custom) : null);
 
@@ -94,8 +79,8 @@ export function TopUpModal() {
   }
 
   async function sendRequest() {
-    if (amountCents == null || amountCents < min) {
-      setError(`${t.minAmount} ${money(min)}`);
+    if (amountCents == null || amountCents < 100) {
+      setError(t.badAmount);
       return;
     }
     if (reference.trim().length < 2) {
@@ -123,8 +108,8 @@ export function TopUpModal() {
   async function creditUser() {
     if (topUp?.mode !== "user") return;
     const cents = dollarsToCents(custom);
-    if (cents == null || cents < min) {
-      setError(`${t.minAmount} ${money(min)}`);
+    if (cents == null || cents < 100) {
+      setError(t.minDollar);
       return;
     }
     setBusy(true);
@@ -135,7 +120,7 @@ export function TopUpModal() {
         setError(result.error);
         return;
       }
-      toast.success(`${t.added} ${money(cents)}`);
+      toast.success(`${t.added} ${money(cents, currency)}`);
       setCustom("");
       closeTopUp();
     } finally {
@@ -149,7 +134,7 @@ export function TopUpModal() {
         role="dialog"
         aria-modal="true"
         aria-labelledby="topup-title"
-        className="glass nova-grid-border relative max-h-[min(92vh,44rem)] w-[95vw] overflow-y-auto rounded-[1.75rem] border border-fuchsia/30 p-5 shadow-[0_0_48px_-14px_rgba(232,121,249,0.85)] sm:max-w-md sm:p-6"
+        className="glass relative max-h-[min(92vh,44rem)] w-[95vw] overflow-y-auto rounded-[1.75rem] border border-fuchsia/30 p-5 shadow-[0_0_48px_-14px_rgba(232,121,249,0.85)] sm:max-w-md sm:p-6"
       >
         <div className="pointer-events-none absolute -top-16 -end-10 h-40 w-40 rounded-full bg-[radial-gradient(circle,rgba(139,92,246,0.55),transparent_70%)]" />
         <div className="relative flex items-start justify-between gap-3">
@@ -160,7 +145,7 @@ export function TopUpModal() {
             </h2>
             {profile && topUp.mode === "self" ? (
               <p className="mt-1 text-sm text-muted">
-                {t.walletIs} <span className="font-semibold text-white tabular-nums">{money(profile.balanceCents)}</span>
+                {t.walletIs} <span className="font-semibold text-white tabular-nums">{money(profile.balanceCents, currency)}</span>
               </p>
             ) : null}
           </div>
@@ -172,15 +157,16 @@ export function TopUpModal() {
         {topUp.mode === "self" ? (
           <div className="relative mt-5">
             <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
-              {PACKS[currency].map((cents) => {
-                const active = packCents === cents;
+              {PACKS[currency].map((major) => {
+                const pack = { cents: major * 100, label: money(major * 100, currency) };
+                const active = packCents === pack.cents;
                 return (
                   <button
-                    key={cents}
+                    key={pack.cents}
                     type="button"
                     disabled={busy}
                     onClick={() => {
-                      setPackCents(cents);
+                      setPackCents(pack.cents);
                       setCustom("");
                       setError(null);
                       setCopied(false);
@@ -191,14 +177,14 @@ export function TopUpModal() {
                         : "glass hover:border-violet/70"
                     }`}
                   >
-                    {money(cents)}
+                    {pack.label}
                   </button>
                 );
               })}
             </div>
 
             <label className="mt-4 block text-xs font-bold tracking-[0.16em] text-muted uppercase">
-              {t.customAmount} ({currency})
+              {t.customAmount} ({unit})
               <input
                 value={custom}
                 onChange={(event) => {
@@ -206,7 +192,7 @@ export function TopUpModal() {
                   setPackCents(null);
                   setError(null);
                 }}
-                placeholder={currency === "SYP" ? "2000" : "20.00"}
+                placeholder={currency === "SYP" ? "5000" : "20.00"}
                 className="field mt-2 font-normal tracking-normal normal-case"
                 inputMode="decimal"
                 dir="ltr"
@@ -240,7 +226,7 @@ export function TopUpModal() {
                   />
                 </label>
                 <p className="mt-2 text-sm">
-                  {t.amount}: <span className="font-semibold tabular-nums">{money(amountCents)}</span>
+                  {t.amount}: <span className="font-semibold tabular-nums">{money(amountCents, currency)}</span>
                   <span className="ms-2 text-amber-100">{t.statusProcessing}</span>
                 </p>
                 <button
@@ -275,13 +261,13 @@ export function TopUpModal() {
         ) : (
           <div className="relative mt-5">
             <label className="text-sm font-semibold" htmlFor="admin-credit">
-              {t.amountToAdd} ({currency})
+              {t.amount} ({unit})
             </label>
             <input
               id="admin-credit"
               value={custom}
               onChange={(event) => setCustom(event.target.value)}
-              placeholder={currency === "SYP" ? "2500" : "25.00"}
+              placeholder={currency === "SYP" ? "5000" : "25.00"}
               className="field mt-2"
               inputMode="decimal"
               dir="ltr"

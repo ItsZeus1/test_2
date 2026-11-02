@@ -1,11 +1,10 @@
 import { createContext, useCallback, useContext, useEffect, useState, type FormEvent, type ReactNode } from "react";
 
 import { ThemeSegmented, applyTheme, readSavedTheme } from "@/components/theme-toggle";
-import { useI18n } from "@/lib/i18n";
+import { useI18n, useMoney } from "@/lib/i18n";
 import { onStoreChange, readProfile, updateProfile, warmupStore } from "@/lib/store/api";
-import { currencyLabel, formatMoney } from "@/lib/money";
 import type { Profile } from "@/lib/store/types";
-import { useNovaUi, type Lang } from "@/lib/ui-store";
+import { CURRENCY_KEY, useNovaUi, type Lang } from "@/lib/ui-store";
 import { RoleBadge } from "@/components/role-badge";
 import { toast } from "sonner";
 
@@ -40,11 +39,12 @@ export function useProfileState(): ProfileState {
 }
 
 export function ProfileSummary({ onTopUp }: { onTopUp?: () => void }) {
-  const { language, t } = useI18n();
+  const { t } = useI18n();
+  const money = useMoney();
   const { profile } = useProfileState();
   if (!profile) return null;
   return (
-    <div className="glass nova-grid-border w-full rounded-2xl p-3 sm:max-w-md">
+    <div className="glass w-full rounded-2xl p-3 sm:max-w-md">
       <p className="text-[11px] font-bold tracking-[0.16em] text-violet uppercase">{t.wallet}</p>
       <p className="mt-1 font-semibold">{profile.name}</p>
       <p className="text-sm text-muted" dir="ltr">
@@ -52,8 +52,7 @@ export function ProfileSummary({ onTopUp }: { onTopUp?: () => void }) {
       </p>
       <div className="mt-3 flex flex-wrap items-center gap-2">
         <RoleBadge role={profile.role} />
-        <span className="font-semibold tabular-nums">{formatMoney(profile.balanceCents, profile.currency, language)}</span>
-        <span className="rounded-full border border-white/10 px-2 py-0.5 text-[10px] font-bold tracking-wide">{profile.currency}</span>
+        <span className="font-semibold tabular-nums">{money(profile.balanceCents, profile.currency)}</span>
         {onTopUp ? (
           <button type="button" onClick={onTopUp} className="min-h-11 rounded-full border border-white/15 px-3 text-sm font-semibold">
             {t.topUp}
@@ -81,6 +80,8 @@ export function ProfileProvider({ children }: { children: ReactNode }) {
     try {
       const saved = localStorage.getItem(LANG_KEY);
       if (saved === "ar" || saved === "en") setLanguage(saved);
+      const currency = localStorage.getItem(CURRENCY_KEY);
+      if (currency === "USD" || currency === "SYP") useNovaUi.setState({ previewCurrency: currency });
     } catch {
       /* ignore */
     }
@@ -128,7 +129,8 @@ export function ProfileProvider({ children }: { children: ReactNode }) {
 }
 
 export function ProfileSettingsModal() {
-  const { language, t } = useI18n();
+  const { t } = useI18n();
+  const money = useMoney();
   const open = useNovaUi((state) => state.profileOpen);
   const closeProfile = useNovaUi((state) => state.closeProfile);
   const { profile, setProfile } = useProfileState();
@@ -180,7 +182,7 @@ export function ProfileSettingsModal() {
   return (
     <div className="fixed inset-0 z-50 grid place-items-center p-4">
       <button type="button" className="absolute inset-0 bg-black/60" aria-label={t.menuClose} onClick={closeProfile} />
-      <form onSubmit={(event) => void onSubmit(event)} className="glass nova-grid-border relative z-10 w-full max-w-md rounded-3xl p-5">
+      <form onSubmit={(event) => void onSubmit(event)} className="glass relative z-10 w-full max-w-md rounded-3xl p-5">
         <p className="text-xs font-bold tracking-[0.16em] text-violet uppercase">{t.profile}</p>
         <h2 className="mt-1 font-display text-2xl font-extrabold">{t.profileTitle}</h2>
         <div className="mt-4 flex items-center gap-3">
@@ -209,10 +211,8 @@ export function ProfileSettingsModal() {
           <ThemeSegmented label={t.appearance} />
         </div>
         <p className="mt-3 text-sm">
-          {t.balance}: <span className="font-semibold tabular-nums">{formatMoney(profile.balanceCents, profile.currency, language)}</span>
-        </p>
-        <p className="mt-1 text-xs text-muted">
-          {t.accountCurrency}: <span className="font-semibold">{currencyLabel(profile.currency, language)}</span>
+          {t.balance}: <span className="font-semibold tabular-nums">{money(profile.balanceCents, profile.currency)}</span>
+          <span className="ms-2 rounded-full border border-white/15 px-2 py-0.5 text-[11px] font-bold">{profile.currency === "SYP" ? "SYP ل.س" : "USD $"}</span>
         </p>
         <div className="mt-4 flex gap-2">
           <button type="submit" disabled={busy} className="btn-glow min-h-11 flex-1 rounded-full text-sm font-semibold disabled:opacity-60">

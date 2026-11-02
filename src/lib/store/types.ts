@@ -29,11 +29,6 @@ export type Category = (typeof CATEGORIES)[number]["slug"];
 export type Role = "NORMAL" | "VIP" | "ADMIN";
 export type Rate = "standard" | "vip";
 export type Currency = "USD" | "SYP";
-export const CURRENCIES: Currency[] = ["USD", "SYP"];
-
-export function isCurrency(value: unknown): value is Currency {
-  return value === "USD" || value === "SYP";
-}
 
 export type Profile = {
   userId: string;
@@ -43,9 +38,9 @@ export type Profile = {
   phone: string;
   avatarUrl: string;
   role: Role;
-  /** Wallet balance in minor units of `currency`. */
-  balanceCents: number;
+  /** Account currency, chosen at registration. Wallet balance is in this currency (minor units). */
   currency: Currency;
+  balanceCents: number;
   lastIp: string | null;
   isBlocked: boolean;
 };
@@ -60,10 +55,7 @@ export type CatalogService = {
   descriptionAr: string;
   badge: string | null;
   imageUrl: string;
-  /** Starting price in `currency` (the viewer's currency). */
   startingPriceCents: number;
-  startingPriceUsdCents: number;
-  startingPriceSypCents: number;
   currency: Currency;
   rate: Rate;
 };
@@ -71,11 +63,7 @@ export type CatalogService = {
 export type PublicPackage = {
   id: string;
   sizeName: string;
-  /** Price in `currency` (the viewer's currency). */
   priceCents: number;
-  priceUsdCents: number;
-  priceSypCents: number;
-  currency: Currency;
   rate: Rate;
 };
 
@@ -88,10 +76,9 @@ export type ServiceDetail = CatalogService & {
 export type AdminPackage = {
   id: string;
   sizeName: string;
-  /** USD cents. */
   normalPriceCents: number;
   vipPriceCents: number;
-  /** SYP minor units; 0 = derive from USD x sypRate. */
+  /** Explicit SYP prices (minor units). 0 means "derive from the USD price and the SYP rate". */
   normalPriceSypCents: number;
   vipPriceSypCents: number;
   apiEndpoint: string;
@@ -102,10 +89,10 @@ export type AdminService = {
   id: string;
   name: string;
   nameAr: string;
+  descriptionAr: string;
   slug: string;
   category: Category;
   description: string;
-  descriptionAr: string;
   instructions: string;
   badge: string | null;
   imageUrl: string;
@@ -137,8 +124,8 @@ export type AdminUser = {
   username: string;
   email: string;
   role: Role;
-  balanceCents: number;
   currency: Currency;
+  balanceCents: number;
   lastIp: string | null;
   lastSeenAt: string;
   isBlocked: boolean;
@@ -147,20 +134,18 @@ export type AdminUser = {
 export type AdminStats = {
   onlineSessions: number;
   serviceCount: number;
-  /** USD revenue in cents. */
   revenueCents: number;
-  revenueSypCents: number;
   recent: AdminOrder[];
 };
 
 export type ServiceWrite = {
   id?: string;
   name: string;
-  nameAr: string;
   slug: string;
   category: Category;
+  nameAr?: string;
+  descriptionAr?: string;
   description: string;
-  descriptionAr: string;
   instructions: string;
   badge: string;
   imageUrl: string;
@@ -183,10 +168,10 @@ export type BalanceRequest = {
   userId: string;
   username: string;
   cents: number;
-  currency: Currency;
   status: BalanceStatus;
   note: string;
   referenceNote: string;
+  currency: Currency;
   createdAt: string;
 };
 
@@ -207,8 +192,8 @@ export function categoryLabel(slug: string): string {
 
 export type StoreSettings = {
   shamcashAddress: string;
+  /** SYP per 1 USD, used when a package has no explicit SYP price. */
+  sypRate?: number;
   offersTickerText?: string;
   offersTickerTextAr?: string;
-  /** New Syrian Pounds per 1 USD, used to derive SYP prices that the admin left at 0. */
-  sypRate: number;
 };

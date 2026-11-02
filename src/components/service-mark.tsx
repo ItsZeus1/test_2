@@ -10,9 +10,8 @@ const PALETTE: Record<Category, [string, string, string]> = {
 };
 
 const SIZE = {
-  /** Compact storefront tile: 48px on phones, 64px from sm up. */
-  card: "size-12 sm:size-16",
   sm: "size-11",
+  card: "size-12 sm:size-16",
   md: "size-16",
   lg: "size-24",
 } as const;

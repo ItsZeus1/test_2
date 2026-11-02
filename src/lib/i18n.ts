@@ -1,21 +1,7 @@
+import { formatMoney } from "@/lib/money";
 import { useNovaUi, type Lang } from "@/lib/ui-store";
 
 const en = {
-  accountCurrency: "Account currency",
-  currencyHint: "Your wallet, prices, orders and top-ups use this currency. It is locked after sign-up.",
-  chooseCurrency: "Choose your account currency (USD or SYP).",
-  usdOption: "USD ($) — US Dollar",
-  sypOption: "SYP (ل.س) — New Syrian Pound",
-  showPricesIn: "Show prices in",
-  sypRateTitle: "Dollar → New Syrian Pound rate",
-  sypRateHint: "SYP per 1 USD. Packages with no explicit SYP price use USD × this rate.",
-  saveRate: "Save rate",
-  rateSaved: "Exchange rate saved",
-  incomeSyp: "Income (SYP)",
-  amountToAdd: "Amount to add",
-  minAmount: "Enter at least",
-  dbLive: "Live from online database",
-  dbLocal: "Offline copy (database not connected)",
   themeLabel: "Theme",
   themeLight: "☀️ Light",
   themeDark: "🌙 Dark",
@@ -229,24 +215,33 @@ const en = {
   blocked: "Blocked",
   userBlocked: "User blocked",
   userUnblocked: "User unblocked",
+  // currency
+  currencyLabel: "Account currency",
+  currencyHint: "Your wallet, prices and orders use this currency. It cannot be changed later.",
+  currencyUsd: "USD ($) — US Dollar",
+  currencySyp: "SYP (ل.س) — New Syrian Pound",
+  currencyPick: "Choose your account currency.",
+  currencyPreview: "Currency",
+  currencyShort: "Currency",
+  sypRateTitle: "Currency & SYP rate",
+  sypRateLabel: "1 USD equals (New SYP)",
+  sypRateHint: "Packages with a blank SYP price follow USD price × this rate. Explicit SYP prices always win.",
+  sypRateSave: "Save rate",
+  sypRateSaved: "SYP rate updated",
+  sypOverview: "Balances are shown in each user's own currency.",
+  incomeNote: "USD equivalent",
+  priceUsdNormal: "Normal price (USD)",
+  priceUsdVip: "VIP price (USD)",
+  priceSypNormal: "Normal price (SYP)",
+  priceSypVip: "VIP price (SYP)",
+  priceSypAuto: "Leave blank to use USD × rate",
+  fillFromRate: "Fill SYP from rate",
+  nameArLabel: "Arabic name",
+  descriptionArLabel: "Arabic description",
+  syncWarning: "Saved on this device only",
 };
 
 const ar: typeof en = {
-  accountCurrency: "عملة الحساب",
-  currencyHint: "تُعرض المحفظة والأسعار والطلبات والشحن بهذه العملة، ولا يمكن تغييرها بعد التسجيل.",
-  chooseCurrency: "اختر عملة الحساب (دولار أو ليرة سورية).",
-  usdOption: "USD ($) — الدولار الأمريكي",
-  sypOption: "SYP (ل.س) — الليرة السورية الجديدة",
-  showPricesIn: "عرض الأسعار بـ",
-  sypRateTitle: "سعر الدولار بالليرة السورية الجديدة",
-  sypRateHint: "عدد الليرات لكل 1 دولار. الباقات بدون سعر ليرة محدد تُحسب = الدولار × هذا السعر.",
-  saveRate: "حفظ السعر",
-  rateSaved: "تم حفظ سعر الصرف",
-  incomeSyp: "الدخل (ل.س)",
-  amountToAdd: "المبلغ المضاف",
-  minAmount: "أدخل على الأقل",
-  dbLive: "مباشر من قاعدة البيانات",
-  dbLocal: "نسخة محلية (قاعدة البيانات غير متصلة)",
   themeLabel: "المظهر",
   themeLight: "☀️ الوضع النهاري",
   themeDark: "🌙 الوضع الليلي",
@@ -460,9 +455,38 @@ const ar: typeof en = {
   blocked: "محظور",
   userBlocked: "تم حظر المستخدم",
   userUnblocked: "تم إلغاء الحظر",
+  // currency
+  currencyLabel: "عملة الحساب",
+  currencyHint: "المحفظة والأسعار والطلبات تُعرض بهذه العملة ولا يمكن تغييرها لاحقاً.",
+  currencyUsd: "USD ($) — الدولار الأمريكي",
+  currencySyp: "SYP (ل.س) — الليرة السورية الجديدة",
+  currencyPick: "اختر عملة حسابك.",
+  currencyPreview: "العملة",
+  currencyShort: "العملة",
+  sypRateTitle: "العملة وسعر الليرة",
+  sypRateLabel: "1 دولار يساوي (ليرة سورية جديدة)",
+  sypRateHint: "الباقات التي سعرها بالليرة فارغ تتبع السعر بالدولار × هذا السعر. الأسعار المحددة بالليرة لها الأولوية دائماً.",
+  sypRateSave: "حفظ السعر",
+  sypRateSaved: "تم تحديث سعر الليرة",
+  sypOverview: "تُعرض الأرصدة بعملة كل مستخدم.",
+  incomeNote: "المعادل بالدولار",
+  priceUsdNormal: "السعر العادي (دولار)",
+  priceUsdVip: "سعر VIP (دولار)",
+  priceSypNormal: "السعر العادي (ل.س)",
+  priceSypVip: "سعر VIP (ل.س)",
+  priceSypAuto: "اتركه فارغاً لاستخدام الدولار × السعر",
+  fillFromRate: "ملء الليرة من السعر",
+  nameArLabel: "الاسم بالعربية",
+  descriptionArLabel: "الوصف بالعربية",
+  syncWarning: "تم الحفظ على هذا الجهاز فقط",
 };
 
 export type Copy = typeof en;
+
+export function useMoney() {
+  const language = useNovaUi((state) => state.language);
+  return (minor: number, currency: "USD" | "SYP" = "USD") => formatMoney(minor, currency, language);
+}
 
 export function useI18n() {
   const language = useNovaUi((state) => state.language);

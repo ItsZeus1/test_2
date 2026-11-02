@@ -6,9 +6,9 @@ import { Menu, Plus, Shield, Wallet, X, Zap } from "lucide-react";
 import { RoleBadge } from "@/components/role-badge";
 import { ThemeIconButton, ThemeSegmented } from "@/components/theme-toggle";
 import { ProfileSummary, applyDocumentLanguage, useProfileState } from "@/components/profile";
-import { categoryName, useI18n } from "@/lib/i18n";
+import { CurrencyPreviewSwitch } from "@/components/currency-switch";
+import { categoryName, useI18n, useMoney } from "@/lib/i18n";
 import { logoutAccount } from "@/lib/store/api";
-import { formatMoney } from "@/lib/money";
 import { CATEGORIES } from "@/lib/store/types";
 import { useNovaUi, type Lang } from "@/lib/ui-store";
 
@@ -95,6 +95,7 @@ function ProfileAvatar() {
 
 export function Navbar() {
   const { t } = useI18n();
+  const money = useMoney();
   const { profile, ready, authPending } = useProfileState();
   const openCreateService = useNovaUi((state) => state.openCreateService);
   const openSelfTopUp = useNovaUi((state) => state.openSelfTopUp);
@@ -145,6 +146,7 @@ export function Navbar() {
 
         <div className="ms-auto flex shrink-0 items-center gap-2">
           {profile ? <ProfileAvatar /> : null}
+          <CurrencyPreviewSwitch className="hidden sm:flex" />
           <ThemeIconButton />
           <LanguageToggle />
 
@@ -175,7 +177,7 @@ export function Navbar() {
               <RoleBadge role={profile.role} />
               <div className="flex items-center gap-2 rounded-full border border-white/10 bg-white/5 py-1 ps-3 pe-1">
                 <Wallet className="size-4 text-violet" />
-                <span className="text-sm font-semibold tabular-nums">{formatMoney(profile.balanceCents, profile.currency)}</span>
+                <span className="text-sm font-semibold tabular-nums">{money(profile.balanceCents, profile.currency)}</span>
                 <button type="button" onClick={openSelfTopUp} className="min-h-9 rounded-full bg-white/10 px-3 text-xs font-bold">
                   {t.topUp}
                 </button>
@@ -218,6 +220,7 @@ export function Navbar() {
                   />
                 ) : null}
                 <div className="mt-2">
+                  <CurrencyPreviewSwitch className="mb-2 w-fit" />
                   <ThemeSegmented />
                 </div>
                 <nav className="mt-2 grid gap-1" aria-label="Mobile">

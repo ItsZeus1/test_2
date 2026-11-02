@@ -6,18 +6,10 @@ import { toast } from "sonner";
 import { ServiceMark } from "@/components/service-mark";
 import { useProfileState } from "@/components/profile";
 import { OffersTicker } from "@/components/offers-ticker";
-import { categoryName, serviceText, useI18n } from "@/lib/i18n";
-import {
-  deleteServiceAction,
-  getPublicCatalog,
-  getViewerCatalog,
-  getVisitorCurrency,
-  onStoreChange,
-  setVisitorCurrency,
-} from "@/lib/store/api";
-import { currencySymbol, formatMoney } from "@/lib/money";
+import { categoryName, serviceText, useI18n, useMoney } from "@/lib/i18n";
+import { deleteServiceAction, getCloudWarning, getPublicCatalog, getViewerCatalog, onStoreChange } from "@/lib/store/api";
 import { useNovaUi } from "@/lib/ui-store";
-import { CATEGORIES, CURRENCIES, type CatalogService, type Category, type Currency } from "@/lib/store/types";
+import { CATEGORIES, type CatalogService, type Category } from "@/lib/store/types";
 
 type Filter = "all" | Category;
 
@@ -25,7 +17,9 @@ const FILTERS: Filter[] = ["all", ...CATEGORIES.map((item) => item.slug)];
 
 export function Storefront({ category = "all" }: { category?: Filter }) {
   const { language, t } = useI18n();
+  const money = useMoney();
   const { profile } = useProfileState();
+  const previewCurrency = useNovaUi((state) => state.previewCurrency);
   const openEditService = useNovaUi((state) => state.openEditService);
   const [filter, setFilter] = useState<Filter>(category);
   const [query, setQuery] = useState("");
@@ -33,7 +27,6 @@ export function Storefront({ category = "all" }: { category?: Filter }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [pendingSlug, setPendingSlug] = useState<string | null>(null);
-  const [visitorCurrency, setVisitorCurrencyState] = useState<Currency>("USD");
   const isAdmin = profile?.role === "ADMIN";
 
   useEffect(() => {
@@ -41,19 +34,10 @@ export function Storefront({ category = "all" }: { category?: Filter }) {
   }, [category]);
 
   useEffect(() => {
-    setVisitorCurrencyState(getVisitorCurrency());
-  }, []);
-
-  function pickVisitorCurrency(next: Currency) {
-    setVisitorCurrencyState(next);
-    setVisitorCurrency(next);
-  }
-
-  useEffect(() => {
     let cancel = false;
     async function load() {
       try {
-        const rows = profile ? await getViewerCatalog() : await getPublicCatalog();
+        const rows = profile ? await getViewerCatalog() : await getPublicCatalog(previewCurrency);
         if (!cancel) {
           setCatalog(rows);
           setError(null);
@@ -72,7 +56,7 @@ export function Storefront({ category = "all" }: { category?: Filter }) {
       cancel = true;
       stop();
     };
-  }, [profile]);
+  }, [profile, previewCurrency]);
 
   const needle = query.trim().toLowerCase();
   const visible = catalog.filter((service) => {
@@ -95,6 +79,8 @@ export function Storefront({ category = "all" }: { category?: Filter }) {
     }
     setPendingSlug(null);
     toast.success(t.removed);
+    const warning = getCloudWarning();
+    if (warning) toast.warning(warning);
   }
 
   return (
@@ -130,7 +116,7 @@ export function Storefront({ category = "all" }: { category?: Filter }) {
 
       <OffersTicker className="mt-4" />
 
-      <div className="mt-5 flex flex-wrap items-center gap-2">
+      <div className="mt-5 flex flex-wrap gap-2">
         {FILTERS.map((id) => {
           const pill = { id, label: id === "all" ? t.allServices : categoryName(t, id) };
           const active = filter === pill.id;
@@ -145,35 +131,14 @@ export function Storefront({ category = "all" }: { category?: Filter }) {
             </button>
           );
         })}
-        {!profile ? (
-          <div
-            role="radiogroup"
-            aria-label={t.showPricesIn}
-            className="ms-auto inline-flex min-h-11 items-center gap-1 rounded-full border border-white/10 bg-white/5 p-1"
-          >
-            <span className="hidden px-2 text-xs font-semibold text-muted sm:inline">{t.showPricesIn}</span>
-            {CURRENCIES.map((code) => (
-              <button
-                key={code}
-                type="button"
-                role="radio"
-                aria-checked={visitorCurrency === code}
-                onClick={() => pickVisitorCurrency(code)}
-                className={`min-h-9 rounded-full px-3 text-xs font-bold ${visitorCurrency === code ? "bg-gradient-to-r from-violet to-fuchsia text-white" : "text-muted"}`}
-              >
-                {code} {currencySymbol(code, language)}
-              </button>
-            ))}
-          </div>
-        ) : null}
       </div>
 
       {error ? <p className="mt-6 text-sm text-fuchsia">{error}</p> : null}
 
       {loading ? (
-        <div className="mt-6 grid grid-cols-3 gap-2.5 sm:grid-cols-3 sm:gap-5 lg:grid-cols-4">
+        <div className="mt-6 grid grid-cols-3 gap-2.5 sm:gap-5 lg:grid-cols-4">
           {Array.from({ length: 6 }).map((_, index) => (
-            <div key={index} className="h-32 animate-pulse rounded-2xl bg-white/5 sm:h-56 sm:rounded-3xl" />
+            <div key={index} className="h-36 animate-pulse rounded-2xl bg-white/5 sm:h-52 sm:rounded-3xl" />
           ))}
         </div>
       ) : visible.length === 0 ? (
@@ -185,47 +150,39 @@ export function Storefront({ category = "all" }: { category?: Filter }) {
             return (
               <article
                 key={service.id}
-                className="tilt-card glass nova-grid-border group relative flex h-full flex-col rounded-2xl p-2.5 sm:rounded-3xl sm:p-4 hover:shadow-[0_0_28px_-8px_rgba(139,92,246,0.85)]"
+                className="nova-grid-border tilt-card glass group relative flex h-full min-w-0 flex-col rounded-2xl p-2 sm:min-h-[17rem] sm:rounded-3xl sm:p-4"
               >
-                <Link
-                  to="/service/$slug"
-                  params={{ slug: service.slug }}
-                  className="flex flex-1 flex-col items-center text-center sm:items-start sm:text-start"
-                >
-                  <span className="mx-auto sm:mx-0">
+                <Link to="/service/$slug" params={{ slug: service.slug }} className="flex min-w-0 flex-1 flex-col">
+                  <div className="flex min-w-0 flex-col items-center gap-1.5 text-center sm:flex-row sm:items-start sm:gap-3 sm:text-start">
                     <ServiceMark slug={service.slug} category={service.category} name={copy.name} imageUrl={service.imageUrl} size="card" />
-                  </span>
-                  <p className="mt-3 hidden text-[11px] font-bold tracking-[0.16em] text-violet uppercase sm:block">
-                    {categoryName(t, service.category)}
-                  </p>
-                  <h2 className="mt-2 line-clamp-1 w-full text-xs font-bold break-all sm:mt-1 sm:font-display sm:text-base sm:font-extrabold sm:break-normal lg:text-lg">
-                    {copy.name}
-                  </h2>
-                  {service.badge ? (
-                    <span className="mt-1 hidden rounded-full border border-fuchsia/40 bg-fuchsia/15 px-2 py-0.5 text-[10px] font-bold tracking-wide text-fuchsia-100 uppercase sm:inline-flex">
-                      {service.badge}
-                    </span>
-                  ) : null}
-                  <p className="mt-2 hidden text-sm text-muted sm:line-clamp-2">{copy.description}</p>
-                  <p className="mt-1 text-[11px] font-semibold sm:mt-auto sm:pt-3 sm:text-sm">
-                    <span className="text-muted">{t.from} </span>
-                    <span className="tabular-nums sm:font-display sm:text-lg sm:font-extrabold">
-                      {formatMoney(service.startingPriceCents, service.currency, language)}
-                    </span>
+                    <div className="min-w-0 max-w-full flex-1">
+                      <p className="hidden text-[11px] font-bold tracking-[0.16em] text-violet uppercase sm:block">{categoryName(t, service.category)}</p>
+                      <h2 className="line-clamp-1 text-center font-display text-xs font-bold sm:text-start sm:text-base sm:font-extrabold lg:text-xl">{copy.name}</h2>
+                      {service.badge ? (
+                        <span className="mt-1 hidden rounded-full border border-fuchsia/40 bg-fuchsia/15 px-2 py-0.5 text-[10px] font-bold tracking-wide text-fuchsia-100 uppercase sm:inline-flex">
+                          {service.badge}
+                        </span>
+                      ) : null}
+                    </div>
+                  </div>
+                  <p className="mt-3 hidden text-sm text-muted sm:line-clamp-2">{copy.description}</p>
+                  <p className="mt-1.5 flex flex-wrap items-center justify-center gap-x-1 text-center text-[11px] font-semibold sm:mt-auto sm:justify-start sm:pt-4 sm:text-start sm:text-sm">
+                    <span className="text-muted">{t.from}</span>
+                    <span className="font-display font-extrabold tabular-nums sm:text-lg">{money(service.startingPriceCents, service.currency)}</span>
                     {service.rate === "vip" ? (
-                      <span className="ms-2 hidden rounded-full border border-amber-200/40 bg-amber-300/15 px-2 py-0.5 text-[10px] font-bold tracking-[0.14em] text-amber-100 sm:inline">
+                      <span className="hidden rounded-full border border-amber-200/40 bg-amber-300/15 px-2 py-0.5 text-[10px] font-bold tracking-[0.14em] text-amber-100 sm:inline">
                         VIP
                       </span>
                     ) : null}
                   </p>
                 </Link>
                 {isAdmin ? (
-                  <div className="mt-2 flex gap-1.5 sm:mt-3 sm:gap-2">
+                  <div className="mt-2 flex flex-wrap gap-1.5 sm:mt-3 sm:gap-2">
                     <button
                       type="button"
                       aria-label={t.edit}
                       onClick={() => openEditService(service.slug)}
-                      className="inline-flex min-h-10 flex-1 items-center justify-center gap-1 rounded-full border border-white/10 text-xs font-bold hover:border-violet hover:shadow-[0_0_18px_-8px_rgba(139,92,246,0.9)] sm:min-h-11"
+                      className="inline-flex min-h-11 flex-1 items-center justify-center gap-1 rounded-full border border-white/10 text-xs font-bold hover:border-violet sm:min-h-11"
                     >
                       <Pencil className="size-3.5" /> <span className="hidden sm:inline">{t.edit}</span>
                     </button>
@@ -233,7 +190,7 @@ export function Storefront({ category = "all" }: { category?: Filter }) {
                       <button
                         type="button"
                         onClick={() => void remove(service.slug)}
-                        className="inline-flex min-h-10 flex-1 items-center justify-center rounded-full bg-rose-500/80 text-[10px] font-bold sm:min-h-11 sm:text-xs"
+                        className="keep-white inline-flex min-h-11 flex-1 items-center justify-center rounded-full bg-rose-500/90 px-2 text-[11px] font-bold text-white sm:min-h-11 sm:text-xs"
                       >
                         {t.confirmDelete}
                       </button>
@@ -242,7 +199,7 @@ export function Storefront({ category = "all" }: { category?: Filter }) {
                         type="button"
                         aria-label={t.delete}
                         onClick={() => setPendingSlug(service.slug)}
-                        className="inline-flex min-h-10 flex-1 items-center justify-center gap-1 rounded-full border border-rose-300/30 text-xs font-bold text-rose-100 sm:min-h-11"
+                        className="inline-flex min-h-11 flex-1 items-center justify-center gap-1 rounded-full border border-rose-300/30 text-xs font-bold text-rose-100 sm:min-h-11"
                       >
                         <Trash2 className="size-3.5" /> <span className="hidden sm:inline">{t.delete}</span>
                       </button>

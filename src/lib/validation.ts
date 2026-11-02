@@ -30,7 +30,7 @@ export const registerSchema = z
     email: z.email("Enter a valid email address."),
     password: passwordSchema,
     confirmPassword: z.string(),
-    currency: z.enum(["USD", "SYP"], { message: "Choose your account currency (USD or SYP)." }),
+    currency: z.enum(["USD", "SYP"], { message: "Choose your account currency." }),
   })
   .refine((value) => value.password === value.confirmPassword, {
     message: "Passwords do not match.",
@@ -62,6 +62,7 @@ export const serviceWriteSchema = z.object({
   id: z.string().trim().min(1).max(80).optional(),
   name: z.string().trim().min(2).max(80),
   nameAr: z.string().trim().max(80).default(""),
+  descriptionAr: z.string().trim().max(500).default(""),
   slug: z
     .string()
     .trim()
@@ -69,7 +70,6 @@ export const serviceWriteSchema = z.object({
     .regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/, "Slug can use lowercase letters, numbers, and hyphens."),
   category: z.enum(categorySlugs),
   description: z.string().trim().min(12).max(500),
-  descriptionAr: z.string().trim().max(500).default(""),
   instructions: z.string().trim().min(12).max(500),
   badge: z.string().trim().max(16),
   imageUrl: z
@@ -93,9 +93,8 @@ export const purchaseSchema = z.object({
     .regex(/^[A-Za-z0-9_@.+()#\-\s]+$/, "That ID contains characters we cannot send."),
 });
 
-// Amounts are minor units of the wallet currency (USD cents or SYP piastres), hence the wide cap.
 export const balanceRequestSchema = z.object({
-  cents: z.number().int().min(100).max(500_000_000),
+  cents: z.number().int().min(100).max(100_000_000_000),
   referenceNote: z.string().trim().min(2, "Enter the ShamCash sender name or reference.").max(160),
 });
 
@@ -109,11 +108,11 @@ export const shamcashSchema = z.object({
 
 export const adminTopUpSchema = z.object({
   userId: z.string().trim().min(1).max(120),
-  cents: z.number().int().min(100).max(500_000_000),
+  cents: z.number().int().min(100).max(100_000_000_000),
 });
 
 export const sypRateSchema = z.object({
-  rate: z.number().positive("Rate must be above 0.").max(1_000_000),
+  rate: z.number().min(1, "Enter how many SYP equal 1 USD.").max(10_000_000),
 });
 
 export const adminRoleSchema = z.object({

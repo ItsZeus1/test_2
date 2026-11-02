@@ -64,7 +64,7 @@ export function WelcomeWizard() {
 
       {step === 0 ? (
         <>
-          <section className="hero-surface nova-grid-border relative mx-auto max-w-5xl overflow-hidden rounded-[2rem] px-5 py-10 text-center sm:px-10 sm:py-14">
+          <section className="hero-surface relative mx-auto max-w-5xl overflow-hidden rounded-[2rem] px-5 py-10 text-center sm:px-10 sm:py-14">
             <p className="text-xs font-semibold tracking-[0.24em] text-violet uppercase">{t.heroKicker}</p>
             <h1 className="mt-4 font-display text-4xl font-extrabold tracking-tight sm:text-6xl lg:text-7xl">
               <span className="text-gradient">{t.brand}</span>
@@ -78,11 +78,11 @@ export function WelcomeWizard() {
               <Stat className="float-y float-delay" icon={Zap} value={t.statInstant} label={t.statAutoTopup} />
             </div>
 
-            <div className="glass float-y absolute start-4 top-6 hidden max-w-[12rem] rounded-2xl px-4 py-3 text-start xl:block">
+            <div className="nova-grid-border glass float-y absolute start-4 top-6 hidden max-w-[12rem] rounded-2xl px-4 py-3 text-start xl:block">
               <p className="text-[10px] font-bold tracking-[0.18em] text-fuchsia uppercase">{t.liveLane}</p>
               <p className="mt-1 text-sm font-semibold">{t.liveLaneBody}</p>
             </div>
-            <div className="glass float-y float-delay absolute end-4 top-6 hidden max-w-[12rem] rounded-2xl px-4 py-3 text-start xl:block">
+            <div className="nova-grid-border glass float-y float-delay absolute end-4 top-6 hidden max-w-[12rem] rounded-2xl px-4 py-3 text-start xl:block">
               <p className="text-[10px] font-bold tracking-[0.18em] text-violet uppercase">{t.walletFirst}</p>
               <p className="mt-1 text-sm font-semibold">{t.walletFirstBody}</p>
             </div>
@@ -134,7 +134,7 @@ export function WelcomeWizard() {
                   key={item.slug}
                   type="button"
                   onClick={() => setPicked(item.slug)}
-                  className={`tilt-card glass nova-grid-border rounded-3xl p-5 text-start ${active ? "card-active" : ""}`}
+                  className={`nova-grid-border tilt-card glass rounded-3xl p-5 text-start ${active ? "card-active" : ""}`}
                 >
                   <span className="icon-tile grid size-12 place-items-center rounded-2xl">
                     <Icon className="size-5" />
@@ -157,7 +157,7 @@ export function WelcomeWizard() {
 
       {step === 2 ? (
         <section className="relative mx-auto grid max-w-5xl items-start gap-6 lg:grid-cols-[0.9fr_1.1fr]">
-          <div className="glass nova-grid-border relative overflow-hidden rounded-[2rem] p-5 sm:p-8">
+          <div className="nova-grid-border glass relative overflow-hidden rounded-[2rem] p-5 sm:p-8">
             <Sparkles className="size-5 text-fuchsia" />
             <h2 className="mt-4 font-display text-2xl font-extrabold leading-tight sm:text-4xl">
               <span className="text-gradient">{t.openWallet}</span>
@@ -190,7 +190,7 @@ function Stat({
   className?: string;
 }) {
   return (
-    <div className={`glass nova-grid-border rounded-3xl px-3 py-4 sm:px-4 sm:py-5 ${className ?? ""}`}>
+    <div className={`nova-grid-border glass rounded-3xl px-3 py-4 sm:px-4 sm:py-5 ${className ?? ""}`}>
       <Icon className="mx-auto size-5 text-fuchsia" />
       <p className="mt-2 font-display text-xl font-extrabold tabular-nums sm:text-2xl">{value}</p>
       <p className="text-xs font-semibold tracking-[0.16em] text-muted uppercase">{label}</p>

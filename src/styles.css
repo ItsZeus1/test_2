@@ -61,13 +61,6 @@
   --nc-text-gradient: linear-gradient(120deg, #0f172a 10%, #4f46e5 55%, #c026d3);
   --nc-scroll-track: #f1f5f9;
   --nc-scroll-thumb: #cbd5e1;
-  /* Animated grid-line border (light): slate grid, indigo -> cyan -> violet highlight */
-  --nc-grid-line: rgb(100 116 139 / 0.11);
-  --nc-flow-base: rgb(148 163 184 / 0.38);
-  --nc-flow-a: #6366f1;
-  --nc-flow-b: #06b6d4;
-  --nc-flow-c: #8b5cf6;
-  --nc-flow-glow: none;
 }
 
 :root.dark {
@@ -92,13 +85,6 @@
   --nc-text-gradient: linear-gradient(to bottom right, #ffffff, #e2e8f0 45%, #c4b5fd);
   --nc-scroll-track: #07080d;
   --nc-scroll-thumb: #3a3358;
-  /* Animated grid-line border (dark): cyber grid, neon cyan -> purple -> emerald highlight */
-  --nc-grid-line: rgb(34 211 238 / 0.075);
-  --nc-flow-base: rgb(148 163 184 / 0.14);
-  --nc-flow-a: #22d3ee;
-  --nc-flow-b: #a855f7;
-  --nc-flow-c: #34d399;
-  --nc-flow-glow: drop-shadow(0 0 6px rgb(34 211 238 / 0.55));
 }
 
 @layer base {
@@ -357,86 +343,6 @@ select.field option {
   }
 }
 
-/* ---------- Animated moving colour grid-line border ---------- */
-@property --nc-border-angle {
-  syntax: "<angle>";
-  inherits: false;
-  initial-value: 0deg;
-}
-
-.nova-grid-border,
-.animated-border-box {
-  position: relative;
-  isolation: isolate;
-}
-
-/* Moving gradient ring: a rotating conic gradient masked down to a 1.5px border. */
-.nova-grid-border::before,
-.animated-border-box::before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  z-index: 1;
-  padding: 1.5px;
-  border-radius: inherit;
-  pointer-events: none;
-  background: conic-gradient(
-    from var(--nc-border-angle),
-    var(--nc-flow-base) 0deg,
-    var(--nc-flow-base) 190deg,
-    var(--nc-flow-a) 245deg,
-    var(--nc-flow-b) 295deg,
-    var(--nc-flow-c) 335deg,
-    var(--nc-flow-base) 360deg
-  );
-  -webkit-mask:
-    linear-gradient(#000 0 0) content-box,
-    linear-gradient(#000 0 0);
-  -webkit-mask-composite: xor;
-  mask:
-    linear-gradient(#000 0 0) content-box,
-    linear-gradient(#000 0 0);
-  mask-composite: exclude;
-  filter: var(--nc-flow-glow);
-  animation: border-flow 7s linear infinite;
-}
-
-/* Crisp grid lines behind the content, fading toward the bottom. */
-.nova-grid-border::after,
-.animated-border-box::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  z-index: -1;
-  border-radius: inherit;
-  pointer-events: none;
-  background-image:
-    linear-gradient(var(--nc-grid-line) 1px, transparent 1px),
-    linear-gradient(90deg, var(--nc-grid-line) 1px, transparent 1px);
-  background-size: 22px 22px;
-  background-position: -1px -1px;
-  -webkit-mask-image: radial-gradient(120% 90% at 50% 0%, #000 35%, transparent 100%);
-  mask-image: radial-gradient(120% 90% at 50% 0%, #000 35%, transparent 100%);
-}
-
-.nova-grid-border:hover::before,
-.animated-border-box:hover::before {
-  animation-duration: 2.8s;
-}
-
-@keyframes border-flow {
-  to {
-    --nc-border-angle: 360deg;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .nova-grid-border::before,
-  .animated-border-box::before {
-    animation: none;
-  }
-}
-
 @media (prefers-reduced-motion: reduce) {
   .float-y,
   .pulse-dot,
@@ -448,5 +354,89 @@ select.field option {
 
   .tilt-card:hover {
     transform: none;
+  }
+}
+
+/* ---------- Animated moving grid-line border (.nova-grid-border) ---------- */
+@property --nova-angle {
+  syntax: "<angle>";
+  initial-value: 0deg;
+  inherits: false;
+}
+
+:root,
+:root.light {
+  --nova-line: rgb(100 116 139 / 0.13);
+  --nova-c1: #6366f1;
+  --nova-c2: #06b6d4;
+  --nova-c3: #8b5cf6;
+}
+
+:root.dark {
+  --nova-line: rgb(34 211 238 / 0.09);
+  --nova-c1: #22d3ee;
+  --nova-c2: #a855f7;
+  --nova-c3: #10b981;
+}
+
+.keep-white {
+  --color-white: #fff;
+  color: #fff;
+}
+
+.nova-grid-border {
+  position: relative;
+  isolation: isolate;
+}
+
+/* crisp grid lines, faded toward the middle so content stays clean */
+.nova-grid-border::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  border-radius: inherit;
+  pointer-events: none;
+  background-image:
+    linear-gradient(var(--nova-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--nova-line) 1px, transparent 1px);
+  background-size: 18px 18px;
+  -webkit-mask-image: radial-gradient(ellipse at center, transparent 35%, #000 100%);
+  mask-image: radial-gradient(ellipse at center, transparent 35%, #000 100%);
+}
+
+/* moving colour highlight that glides around the perimeter */
+.nova-grid-border::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  padding: 1.5px;
+  border-radius: inherit;
+  pointer-events: none;
+  background: conic-gradient(
+    from var(--nova-angle),
+    transparent 0 55%,
+    var(--nova-c1) 70%,
+    var(--nova-c2) 82%,
+    var(--nova-c3) 92%,
+    transparent 100%
+  );
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  mask-composite: exclude;
+  animation: border-flow 6s linear infinite;
+}
+
+@keyframes border-flow {
+  to {
+    --nova-angle: 360deg;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .nova-grid-border::before {
+    animation: none;
   }
 }

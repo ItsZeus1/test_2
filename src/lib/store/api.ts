@@ -1,18 +1,9 @@
 import { getSupabase, supabaseEnv } from "@/lib/supabase";
-import {
-  dbDeleteService,
-  dbFetchCatalog,
-  dbFetchSettings,
-  dbSaveService,
-  dbSaveSettings,
-  dbSeedCatalog,
-  dbStatus,
-  dbUpsertUsers,
-  type DbSettings,
-} from "@/lib/db";
-import { readPreviewCurrency, writePreviewCurrency } from "@/lib/money";
+import { balanceCap } from "@/lib/money";
 import {
   ADMIN_BALANCE_CENTS,
+  DEFAULT_SYP_RATE_VALUE,
+  packagePrice,
   ADMIN_EMAIL,
   ADMIN_NAME,
   ADMIN_PASSWORD,
@@ -36,7 +27,6 @@ import {
   arabicFor,
   mergeSeedCatalog,
   normalizeState,
-  packPrice,
   rateFor,
   serviceTargetLabel,
   toProfile,
@@ -62,7 +52,6 @@ import type {
   Role,
   ServiceDetail,
   ServiceWrite,
-  StoreSettings,
 } from "@/lib/store/types";
 import {
   adminRoleSchema,
@@ -90,6 +79,8 @@ export type SyncStatus = {
   configured: boolean;
   mode: SyncMode;
   detail: string;
+  /** State of the relational catalog tables (services, service_packages, store_settings). */
+  catalog: "ok" | "missing" | "blocked" | "off";
 };
 
 type Ok<T extends object = object> = { ok: true } & T;
@@ -98,7 +89,6 @@ type Err = { ok: false; error: string };
 const listeners = new Set<() => void>();
 const SESSION_MS = 1000 * 60 * 60 * 24 * 30;
 const ONLINE_MS = 1000 * 60 * 15;
-const BALANCE_CAP = 2_000_000_000;
 
 let memory: NovaState | null = null;
 let mode: SyncMode = "local";
@@ -107,11 +97,9 @@ let queue: Promise<unknown> = Promise.resolve();
 let ready: Promise<void> | null = null;
 let writing = false;
 let pollStarted = false;
+let catalogMode: SyncStatus["catalog"] = "off";
 let cachedIp = "";
 let cachedIpAt = 0;
-let dbOnline = false;
-let dbSignature = "";
-let pollTick = 0;
 
 function enqueue<T>(task: () => Promise<T>): Promise<T> {
   const run = queue.then(task, task);
@@ -135,8 +123,18 @@ export function getSyncStatus(): SyncStatus {
   return {
     configured: supabaseEnv().enabled,
     mode,
-    detail: dbOnline ? `Catalog & settings live from the online database. ${modeDetail}` : dbStatus().detail || modeDetail,
+    detail: modeDetail,
+    catalog: catalogMode,
   };
+}
+
+/** Non-null when an admin save only reached this browser (cloud tables missing or blocked). */
+export function getCloudWarning(): string | null {
+  if (!supabaseEnv().enabled) return "Supabase is not configured: changes are saved on this device only.";
+  if (catalogMode !== "ok" && mode === "local") {
+    return "Changes were saved on this device only. Run migrations/0002_novacharge.sql in Supabase so other devices see them.";
+  }
+  return null;
 }
 
 function unwrap<T>(input: T | { data: T }): T {
@@ -220,11 +218,7 @@ function readLocal(): NovaState | null {
 
 function writeLocal(state: NovaState): void {
   if (typeof window === "undefined") return;
-  try {
-    window.localStorage.setItem(STATE_KEY, JSON.stringify(state));
-  } catch {
-    /* quota or private mode: the online database stays the source of truth */
-  }
+  window.localStorage.setItem(STATE_KEY, JSON.stringify(state));
 }
 
 function readToken(): string | null {
@@ -400,7 +394,7 @@ async function pullCloud(): Promise<NovaState | null> {
   return null;
 }
 
-async function pushCloud(state: NovaState): Promise<void> {
+async function pushBlob(state: NovaState): Promise<void> {
   if (!supabaseEnv().enabled) return;
   if (mode === "table") {
     const result = await writeTable(state);
@@ -420,6 +414,178 @@ async function pushCloud(state: NovaState): Promise<void> {
       modeDetail = `Synced through ${CLOUD_TABLE}.`;
     }
   }
+}
+
+type RelSnapshot = {
+  services: Array<Record<string, unknown>>;
+  packages: Array<Record<string, unknown>>;
+  settings: Record<string, unknown>;
+};
+
+const inList = (ids: string[]) => `(${ids.map((id) => `"${id.replace(/"/g, "")}"`).join(",")})`;
+
+/** Write-through of the catalog + settings to real tables so every device reads the same rows. */
+async function writeRelational(state: NovaState): Promise<void> {
+  const client = getSupabase();
+  if (!client) {
+    catalogMode = "off";
+    return;
+  }
+  try {
+    const now = state.updatedAt;
+    const serviceRows = state.services.map((service) => ({
+      id: service.id,
+      slug: service.slug,
+      name: service.name,
+      name_ar: service.nameAr || "",
+      category: service.category,
+      description: service.description,
+      description_ar: service.descriptionAr || "",
+      instructions: service.instructions,
+      badge: service.badge,
+      image_url: service.imageUrl || "",
+      created_at: service.createdAt,
+      updated_at: now,
+    }));
+    const packageRows = state.packages.map((pack) => ({
+      id: pack.id,
+      service_id: pack.serviceId,
+      size_name: pack.sizeName,
+      price_usd_cents: pack.normalPriceCents,
+      vip_price_usd_cents: pack.vipPriceCents,
+      price_syp_cents: pack.normalPriceSypCents ?? 0,
+      vip_price_syp_cents: pack.vipPriceSypCents ?? 0,
+      sort_order: pack.sortOrder,
+      updated_at: now,
+    }));
+    const steps = [
+      serviceRows.length ? await client.from("services").upsert(serviceRows, { onConflict: "id" }) : null,
+      serviceRows.length
+        ? await client.from("services").delete().not("id", "in", inList(serviceRows.map((row) => row.id)))
+        : await client.from("services").delete().neq("id", ""),
+      packageRows.length ? await client.from("service_packages").upsert(packageRows, { onConflict: "id" }) : null,
+      packageRows.length
+        ? await client.from("service_packages").delete().not("id", "in", inList(packageRows.map((row) => row.id)))
+        : await client.from("service_packages").delete().neq("id", ""),
+      await client.from("store_settings").upsert(
+        {
+          id: CLOUD_ROW_ID,
+          shamcash_address: state.shamcashAddress,
+          offers_ticker_text: state.offersTickerText ?? "",
+          offers_ticker_text_ar: state.offersTickerTextAr ?? "",
+          syp_rate: state.sypRate ?? DEFAULT_SYP_RATE_VALUE,
+          deleted_slugs: state.deletedSlugs ?? [],
+          state_version: state.version,
+          updated_at: now,
+        },
+        { onConflict: "id" },
+      ),
+    ];
+    const failed = steps.find((step) => step?.error);
+    if (failed?.error) {
+      catalogMode = missingRelation(failed.error) ? "missing" : "blocked";
+      if (catalogMode === "blocked") modeDetail = failed.error.message || "Catalog tables rejected the write.";
+      return;
+    }
+    catalogMode = "ok";
+  } catch (error) {
+    catalogMode = "blocked";
+    modeDetail = fail(error);
+  }
+}
+
+async function readRelational(): Promise<RelSnapshot | null> {
+  const client = getSupabase();
+  if (!client) {
+    catalogMode = "off";
+    return null;
+  }
+  try {
+    const [services, packages, settings] = await Promise.all([
+      client.from("services").select("*"),
+      client.from("service_packages").select("*"),
+      client.from("store_settings").select("*").eq("id", CLOUD_ROW_ID).maybeSingle(),
+    ]);
+    const error = services.error ?? packages.error ?? settings.error;
+    if (error) {
+      catalogMode = missingRelation(error) ? "missing" : "blocked";
+      return null;
+    }
+    if (!settings.data) {
+      catalogMode = "ok";
+      return null;
+    }
+    catalogMode = "ok";
+    return {
+      services: (services.data ?? []) as Array<Record<string, unknown>>,
+      packages: (packages.data ?? []) as Array<Record<string, unknown>>,
+      settings: settings.data as Record<string, unknown>,
+    };
+  } catch {
+    catalogMode = "blocked";
+    return null;
+  }
+}
+
+const str = (value: unknown, fallback = "") => (typeof value === "string" ? value : fallback);
+const num = (value: unknown, fallback = 0) => (Number.isFinite(Number(value)) ? Number(value) : fallback);
+
+/** The tables are the source of truth for catalog + settings, unless the blob copy is newer (a failed table write). */
+function applyRelational(state: NovaState, rel: RelSnapshot | null): NovaState {
+  if (!rel) return state;
+  const tableVersion = num(rel.settings.state_version);
+  if (tableVersion < state.version) return state;
+  const next = cloneState(state);
+  const oldPacks = new Map(state.packages.map((pack) => [pack.id, pack]));
+  const oldServices = new Map(state.services.map((service) => [service.id, service]));
+  next.services = rel.services.map((row) => {
+    const old = oldServices.get(str(row.id));
+    return {
+      id: str(row.id),
+      slug: str(row.slug),
+      name: str(row.name),
+      nameAr: str(row.name_ar),
+      category: str(row.category, "games") as StoredService["category"],
+      description: str(row.description),
+      descriptionAr: str(row.description_ar),
+      instructions: str(row.instructions, old?.instructions ?? ""),
+      badge: typeof row.badge === "string" && row.badge ? row.badge : null,
+      imageUrl: str(row.image_url),
+      createdAt: str(row.created_at, old?.createdAt ?? new Date().toISOString()),
+    };
+  });
+  next.packages = rel.packages.map((row) => {
+    const old = oldPacks.get(str(row.id));
+    return {
+      id: str(row.id),
+      serviceId: str(row.service_id),
+      sizeName: str(row.size_name),
+      normalPriceCents: num(row.price_usd_cents),
+      vipPriceCents: num(row.vip_price_usd_cents),
+      normalPriceSypCents: num(row.price_syp_cents),
+      vipPriceSypCents: num(row.vip_price_syp_cents),
+      // provider endpoint + secret never live in the public tables; keep the copy from the private state.
+      apiEndpoint: old?.apiEndpoint ?? "",
+      apiSecretCode: old?.apiSecretCode ?? "",
+      sortOrder: num(row.sort_order),
+    };
+  });
+  next.shamcashAddress = str(rel.settings.shamcash_address) || next.shamcashAddress;
+  next.offersTickerText = str(rel.settings.offers_ticker_text) || next.offersTickerText;
+  next.offersTickerTextAr = str(rel.settings.offers_ticker_text_ar) || next.offersTickerTextAr;
+  next.sypRate = num(rel.settings.syp_rate, next.sypRate ?? DEFAULT_SYP_RATE_VALUE) || DEFAULT_SYP_RATE_VALUE;
+  next.deletedSlugs = Array.isArray(rel.settings.deleted_slugs) ? (rel.settings.deleted_slugs as string[]) : next.deletedSlugs;
+  next.version = Math.max(state.version, tableVersion);
+  return next;
+}
+
+async function pushCloud(state: NovaState): Promise<void> {
+  try {
+    await pushBlob(state);
+  } catch (error) {
+    modeDetail = fail(error);
+  }
+  await writeRelational(state);
 }
 
 function prefer(local: NovaState, remote: NovaState | null): NovaState {
@@ -447,7 +613,6 @@ async function heal(state: NovaState): Promise<NovaState> {
       passwordSalt: hashed.passwordSalt,
       role: "ADMIN",
       balanceCents: ADMIN_BALANCE_CENTS,
-      currency: "USD",
       isBlocked: false,
       lastIp: "seed",
       lastSeenAt: now,
@@ -468,88 +633,6 @@ async function heal(state: NovaState): Promise<NovaState> {
   return next;
 }
 
-function dbFingerprint(state: NovaState): string {
-  return JSON.stringify([
-    state.services,
-    state.packages,
-    state.shamcashAddress,
-    state.offersTickerText,
-    state.offersTickerTextAr,
-    state.sypRate,
-  ]);
-}
-
-/** Copies DB-owned fields (catalog + settings) from `source` so an older blob never reverts them. */
-function keepDbFields(target: NovaState, source: NovaState | null): NovaState {
-  if (!dbOnline || !source) return target;
-  target.services = source.services;
-  target.packages = source.packages;
-  target.shamcashAddress = source.shamcashAddress;
-  target.offersTickerText = source.offersTickerText ?? DEFAULT_TICKER_EN;
-  target.offersTickerTextAr = source.offersTickerTextAr ?? DEFAULT_TICKER_AR;
-  target.sypRate = source.sypRate;
-  return target;
-}
-
-/**
- * Reads services, service_packages and store_settings from the online database and makes them
- * authoritative. The first time the tables are empty, the current catalog/settings are uploaded.
- */
-async function overlayDb(state: NovaState): Promise<{ state: NovaState; changed: boolean }> {
-  let catalog: Awaited<ReturnType<typeof dbFetchCatalog>>;
-  let settings: Awaited<ReturnType<typeof dbFetchSettings>>;
-  try {
-    [catalog, settings] = await Promise.all([dbFetchCatalog(), dbFetchSettings()]);
-  } catch (error) {
-    modeDetail = fail(error);
-    return { state, changed: false };
-  }
-  if (catalog === "offline" || settings === "offline") {
-    dbOnline = false;
-    return { state, changed: false };
-  }
-  dbOnline = true;
-  const seedSettings: Partial<DbSettings> = {};
-  if (settings?.shamcashAddress) state.shamcashAddress = settings.shamcashAddress;
-  else seedSettings.shamcashAddress = state.shamcashAddress;
-  if (settings?.offersTickerText) state.offersTickerText = settings.offersTickerText;
-  else seedSettings.offersTickerText = state.offersTickerText ?? "";
-  if (settings?.offersTickerTextAr) state.offersTickerTextAr = settings.offersTickerTextAr;
-  else seedSettings.offersTickerTextAr = state.offersTickerTextAr ?? "";
-  if (settings) state.sypRate = settings.sypRate;
-  else seedSettings.sypRate = state.sypRate;
-  try {
-    if (catalog.services.length === 0 && !settings?.catalogSeeded) {
-      await dbSeedCatalog(state.services, state.packages);
-    } else {
-      state.services = catalog.services;
-      state.packages = catalog.packages;
-      if (!settings?.catalogSeeded) seedSettings.catalogSeeded = true;
-    }
-    if (Object.keys(seedSettings).length) await dbSaveSettings(seedSettings);
-  } catch (error) {
-    modeDetail = fail(error);
-  }
-  const signature = dbFingerprint(state);
-  const changed = signature !== dbSignature;
-  dbSignature = signature;
-  return { state, changed };
-}
-
-function mirrorKey(user: StoredUser): string {
-  return [user.name, user.username, user.email, user.phone, user.role, user.currency, user.balanceCents, user.isBlocked].join("|");
-}
-
-/** Write-through of profile/currency/balance changes into the users table. */
-function mirrorUsers(before: NovaState, after: NovaState): void {
-  if (!dbOnline) return;
-  const changed = after.users.filter((user) => {
-    const prior = before.users.find((item) => item.id === user.id);
-    return !prior || mirrorKey(prior) !== mirrorKey(user);
-  });
-  if (changed.length) void dbUpsertUsers(changed).catch((error) => (modeDetail = fail(error)));
-}
-
 async function loadAuthoritative(): Promise<NovaState> {
   const local = memory ?? readLocal() ?? blankState();
   let remote: NovaState | null = null;
@@ -559,10 +642,11 @@ async function loadAuthoritative(): Promise<NovaState> {
     mode = "local";
     modeDetail = fail(error);
   }
-  const healed = (await overlayDb(await heal(prefer(local, remote)))).state;
+  const rel = await readRelational();
+  const healed = await heal(applyRelational(prefer(local, remote), rel));
   memory = healed;
   writeLocal(healed);
-  if (remote === null || healed.version !== remote.version || healed.updatedAt !== remote.updatedAt) {
+  if (remote === null || healed.version !== remote.version || healed.updatedAt !== remote.updatedAt || catalogMode !== "ok" || !rel) {
     try {
       await pushCloud(healed);
     } catch (error) {
@@ -587,35 +671,19 @@ function startPoll(): void {
     void enqueue(async () => {
       const current = memory;
       if (!current) return;
-      let next: NovaState | null = null;
       const remote = await pullCloud();
-      if (!remote || remote.version < current.version) {
-        if (supabaseEnv().enabled) await pushCloud(current);
-      } else if (remote.version !== current.version) {
-        next = keepDbFields(await heal(remote), current);
+      const rel = await readRelational();
+      const base = remote && remote.version >= current.version ? remote : current;
+      const merged = await heal(applyRelational(base, rel));
+      if (merged.version > current.version || merged.updatedAt !== current.updatedAt) {
+        memory = merged;
+        writeLocal(memory);
+        emit();
+        return;
       }
-      // Pull catalog + settings straight from the online tables so every device sees admin edits.
-      // Every 2nd tick (~12s) keeps image-heavy catalog reads light; also on focus (below).
-      pollTick += 1;
-      const overlay =
-        pollTick % 2 === 0 || next ? await overlayDb(next ?? cloneState(current)) : { state: current, changed: false };
-      if (!next && !overlay.changed) return;
-      if (writing) return;
-      memory = overlay.state;
-      writeLocal(memory);
-      emit();
+      if ((!remote || remote.version < current.version) && supabaseEnv().enabled) await pushCloud(current);
     });
   }, 6000);
-  window.addEventListener("focus", () => {
-    void enqueue(async () => {
-      if (!memory || writing) return;
-      const overlay = await overlayDb(cloneState(memory));
-      if (!overlay.changed || writing) return;
-      memory = overlay.state;
-      writeLocal(memory);
-      emit();
-    });
-  });
 }
 
 export async function ensureReady(): Promise<void> {
@@ -650,19 +718,17 @@ async function commit<T>(
           remote = null;
         }
         if (remote && remote.version > base.version) {
-          memory = keepDbFields(await heal(remote), memory);
+          memory = await heal(remote);
           writeLocal(memory);
           continue;
         }
         memory = drafted.state;
-        dbSignature = dbFingerprint(drafted.state);
         writeLocal(drafted.state);
         try {
           await pushCloud(drafted.state);
         } catch (error) {
           modeDetail = fail(error);
         }
-        mirrorUsers(base, drafted.state);
         emit();
         return drafted.result;
       }
@@ -752,20 +818,13 @@ function mapOrder(order: StoredOrder): OrderRow {
   };
 }
 
-function lowest(values: number[]): number {
-  return values.length ? Math.min(...values) : 0;
-}
-
-function viewerCurrency(user: StoredUser | null): Currency {
-  return user ? (user.currency === "SYP" ? "SYP" : "USD") : readPreviewCurrency();
-}
-
-function catalogOf(state: NovaState, role: Role | null, currency: Currency): CatalogService[] {
+function catalogOf(state: NovaState, role: Role | null, currency: Currency = "USD"): CatalogService[] {
+  const sypRate = state.sypRate ?? DEFAULT_SYP_RATE_VALUE;
   return state.services
     .map((service) => {
       const packs = state.packages.filter((pack) => pack.serviceId === service.id);
-      const usd = lowest(packs.map((pack) => packPrice(pack, role, "USD", state.sypRate)));
-      const syp = lowest(packs.map((pack) => packPrice(pack, role, "SYP", state.sypRate)));
+      const prices = packs.map((pack) => packagePrice(pack, role, currency, sypRate));
+      const starting = prices.length ? Math.min(...prices) : 0;
       return {
         id: service.id,
         name: service.name,
@@ -776,9 +835,7 @@ function catalogOf(state: NovaState, role: Role | null, currency: Currency): Cat
         descriptionAr: service.descriptionAr || "",
         badge: service.badge,
         imageUrl: service.imageUrl || "",
-        startingPriceCents: currency === "SYP" ? syp : usd,
-        startingPriceUsdCents: usd,
-        startingPriceSypCents: syp,
+        startingPriceCents: starting,
         currency,
         rate: rateFor(role),
       };
@@ -790,25 +847,20 @@ function catalogOf(state: NovaState, role: Role | null, currency: Currency): Cat
     });
 }
 
-function detailOf(state: NovaState, slug: string, role: Role | null, currency: Currency): ServiceDetail | null {
+function detailOf(state: NovaState, slug: string, role: Role | null, currency: Currency = "USD"): ServiceDetail | null {
+  const sypRate = state.sypRate ?? DEFAULT_SYP_RATE_VALUE;
   const service = state.services.find((item) => item.slug === slug);
   if (!service) return null;
   const packages = state.packages
     .filter((pack) => pack.serviceId === service.id)
     .sort((left, right) => left.sortOrder - right.sortOrder)
-    .map((pack) => {
-      const usd = packPrice(pack, role, "USD", state.sypRate);
-      const syp = packPrice(pack, role, "SYP", state.sypRate);
-      return {
-        id: pack.id,
-        sizeName: pack.sizeName,
-        priceCents: currency === "SYP" ? syp : usd,
-        priceUsdCents: usd,
-        priceSypCents: syp,
-        currency,
-        rate: rateFor(role),
-      };
-    });
+    .map((pack) => ({
+      id: pack.id,
+      sizeName: pack.sizeName,
+      priceCents: packagePrice(pack, role, currency, sypRate),
+      rate: rateFor(role),
+    }));
+  const starting = packages.reduce((min, pack) => Math.min(min, pack.priceCents), packages[0]?.priceCents ?? 0);
   return {
     id: service.id,
     name: service.name,
@@ -821,9 +873,7 @@ function detailOf(state: NovaState, slug: string, role: Role | null, currency: C
     imageUrl: service.imageUrl || "",
     instructions: service.instructions,
     targetLabel: serviceTargetLabel(service.category),
-    startingPriceCents: lowest(packages.map((pack) => pack.priceCents)),
-    startingPriceUsdCents: lowest(packages.map((pack) => pack.priceUsdCents)),
-    startingPriceSypCents: lowest(packages.map((pack) => pack.priceSypCents)),
+    startingPriceCents: starting,
     currency,
     rate: rateFor(role),
     packages,
@@ -926,8 +976,8 @@ export async function registerAccount(input: unknown): Promise<Ok<{ token: strin
         passwordHash: hashed.passwordHash,
         passwordSalt: hashed.passwordSalt,
         role: admin ? "ADMIN" : "NORMAL",
+        currency: admin ? "USD" : parsed.data.currency,
         balanceCents: admin ? ADMIN_BALANCE_CENTS : 0,
-        currency: parsed.data.currency,
         isBlocked: false,
         lastIp: ip,
         lastSeenAt: now,
@@ -1031,30 +1081,36 @@ export async function syncMe(input: unknown): Promise<Ok<{ profile: Profile }> |
   }
 }
 
-export async function getPublicCatalog(): Promise<CatalogService[]> {
-  await ensureReady();
-  return catalogOf(memory ?? blankState(), null, readPreviewCurrency());
+function asCurrency(value: unknown): Currency {
+  return value === "SYP" ? "SYP" : "USD";
 }
 
-export async function getViewerCatalog(): Promise<CatalogService[]> {
+export async function getPublicCatalog(currency?: Currency): Promise<CatalogService[]> {
+  await ensureReady();
+  return catalogOf(memory ?? blankState(), null, asCurrency(currency));
+}
+
+export async function getViewerCatalog(currency?: Currency): Promise<CatalogService[]> {
   await ensureReady();
   const state = memory ?? blankState();
   const user = await currentUser(state);
-  return catalogOf(state, user?.role ?? null, viewerCurrency(user));
+  return catalogOf(state, user?.role ?? null, user ? asCurrency(user.currency) : asCurrency(currency));
 }
 
 export async function getPublicService(input: unknown): Promise<ServiceDetail | null> {
-  const parsed = slugSchema.parse(unwrap(input));
+  const raw = unwrap(input) as { currency?: unknown };
+  const parsed = slugSchema.parse(raw);
   await ensureReady();
-  return detailOf(memory ?? blankState(), parsed.slug, null, readPreviewCurrency());
+  return detailOf(memory ?? blankState(), parsed.slug, null, asCurrency(raw?.currency));
 }
 
 export async function getViewerService(input: unknown): Promise<ServiceDetail | null> {
-  const parsed = slugSchema.parse(unwrap(input));
+  const raw = unwrap(input) as { currency?: unknown };
+  const parsed = slugSchema.parse(raw);
   await ensureReady();
   const state = memory ?? blankState();
   const user = await currentUser(state);
-  return detailOf(state, parsed.slug, user?.role ?? null, viewerCurrency(user));
+  return detailOf(state, parsed.slug, user?.role ?? null, user ? asCurrency(user.currency) : asCurrency(raw?.currency));
 }
 
 export async function purchase(input: unknown): Promise<Ok<{ order: OrderRow; profile: Profile }> | Err> {
@@ -1069,8 +1125,8 @@ export async function purchase(input: unknown): Promise<Ok<{ order: OrderRow; pr
       if (!pack) throw new Error("That charge size is no longer available.");
       const service = state.services.find((item) => item.id === pack.serviceId);
       if (!service) throw new Error("That service is no longer available.");
-      const currency = viewerCurrency(user);
-      const price = packPrice(pack, user.role, currency, state.sypRate);
+      const currency = asCurrency(user.currency);
+      const price = packagePrice(pack, user.role, currency, state.sypRate ?? DEFAULT_SYP_RATE_VALUE);
       if (user.balanceCents < price) throw new Error("Not enough wallet balance for this package.");
       user.balanceCents -= price;
       user.lastIp = ip;
@@ -1099,7 +1155,6 @@ export async function purchase(input: unknown): Promise<Ok<{ order: OrderRow; pr
         userId: user.id,
         kind: "purchase",
         cents: -price,
-        currency,
         note: `${service.name} · ${pack.sizeName}`,
       });
       return { state, result: { order: mapOrder(order), profile: toProfile(user) } };
@@ -1135,10 +1190,10 @@ export async function submitBalanceRequest(
         userId: user.id,
         username: user.username,
         cents: parsed.data.cents,
-        currency: viewerCurrency(user),
         status: "PROCESSING",
         note: parsed.data.referenceNote,
         referenceNote: parsed.data.referenceNote,
+        currency: asCurrency(user.currency),
       });
       const stored = state.balanceRequests.find((item) => item.id === id);
       return {
@@ -1150,10 +1205,10 @@ export async function submitBalanceRequest(
             userId: user.id,
             username: user.username,
             cents: parsed.data.cents,
-            currency: viewerCurrency(user),
             status: "PROCESSING" as const,
             note: parsed.data.referenceNote,
             referenceNote: parsed.data.referenceNote,
+            currency: asCurrency(user.currency),
             createdAt: stored?.createdAt ?? new Date().toISOString(),
           },
         },
@@ -1187,10 +1242,10 @@ export async function listMyBalanceRequests(): Promise<BalanceRequest[]> {
       userId: item.userId,
       username: item.username,
       cents: item.cents,
-      currency: item.currency === "SYP" ? ("SYP" as const) : ("USD" as const),
       status: item.status,
       note: item.note,
       referenceNote: item.referenceNote,
+      currency: asCurrency(item.currency),
       createdAt: item.createdAt,
     }));
 }
@@ -1202,10 +1257,10 @@ function adminServiceOf(state: NovaState, slug: string): AdminService | null {
     id: service.id,
     name: service.name,
     nameAr: service.nameAr || "",
+    descriptionAr: service.descriptionAr || "",
     slug: service.slug,
     category: service.category,
     description: service.description,
-    descriptionAr: service.descriptionAr || "",
     instructions: service.instructions,
     badge: service.badge,
     imageUrl: service.imageUrl || "",
@@ -1253,25 +1308,25 @@ export async function saveServiceAction(input: unknown): Promise<Ok<{ slug: stri
         ? state.services.find((item) => item.id === body.id)
         : undefined;
       if (body.id && !service) throw new Error("That service no longer exists.");
-      const arabic = arabicFor(body.slug);
-      const nameAr = body.nameAr.trim() || arabic?.nameAr || "";
-      const descriptionAr = body.descriptionAr.trim() || arabic?.descriptionAr || "";
       if (!service) {
+        const arabic = arabicFor(body.slug);
         service = {
           id: randomId("svc"),
           name: body.name,
-          nameAr,
+          nameAr: body.nameAr || arabic?.nameAr || "",
           slug: body.slug,
           category: body.category,
           description: body.description,
-          descriptionAr,
+          descriptionAr: body.descriptionAr || arabic?.descriptionAr || "",
           instructions: body.instructions,
           badge: body.badge.trim() ? body.badge.trim() : null,
           imageUrl: body.imageUrl.trim(),
           createdAt: new Date().toISOString(),
         };
         state.services.push(service);
+        state.deletedSlugs = (state.deletedSlugs ?? []).filter((item) => item !== body.slug);
       } else {
+        const arabic = arabicFor(body.slug);
         service.name = body.name;
         service.slug = body.slug;
         service.category = body.category;
@@ -1279,27 +1334,26 @@ export async function saveServiceAction(input: unknown): Promise<Ok<{ slug: stri
         service.instructions = body.instructions;
         service.badge = body.badge.trim() ? body.badge.trim() : null;
         service.imageUrl = body.imageUrl.trim();
-        service.nameAr = nameAr;
-        service.descriptionAr = descriptionAr;
+        service.nameAr = body.nameAr || arabic?.nameAr || service.nameAr || "";
+        service.descriptionAr = body.descriptionAr || arabic?.descriptionAr || service.descriptionAr || "";
       }
-      state.deletedSlugs = (state.deletedSlugs ?? []).filter((slug) => slug !== body.slug);
       const serviceId = service.id;
       state.packages = state.packages.filter((pack) => pack.serviceId !== serviceId);
-      const packs: StoredPackage[] = body.packages.map((pack, index) => ({
-        id: pack.id && !pack.id.startsWith("draft-") ? pack.id : randomId("pkg"),
-        serviceId,
-        sizeName: pack.sizeName,
-        normalPriceCents: pack.normalPriceCents,
-        vipPriceCents: pack.vipPriceCents,
-        normalPriceSypCents: pack.normalPriceSypCents ?? 0,
-        vipPriceSypCents: pack.vipPriceSypCents ?? 0,
-        apiEndpoint: pack.apiEndpoint,
-        apiSecretCode: pack.apiSecretCode,
-        sortOrder: index,
-      }));
-      state.packages.push(...packs);
-      // Online database is the source of truth: a failed write aborts the save.
-      await dbSaveService(service, packs);
+      body.packages.forEach((pack, index) => {
+        const stored: StoredPackage = {
+          id: pack.id && !pack.id.startsWith("draft-") ? pack.id : randomId("pkg"),
+          serviceId,
+          sizeName: pack.sizeName,
+          normalPriceCents: pack.normalPriceCents,
+          vipPriceCents: pack.vipPriceCents,
+          normalPriceSypCents: pack.normalPriceSypCents,
+          vipPriceSypCents: pack.vipPriceSypCents,
+          apiEndpoint: pack.apiEndpoint,
+          apiSecretCode: pack.apiSecretCode,
+          sortOrder: index,
+        };
+        state.packages.push(stored);
+      });
       return { state, result: body.slug };
     });
     return { ok: true, slug };
@@ -1316,7 +1370,6 @@ export async function deleteServiceAction(input: unknown): Promise<{ ok: true } 
       requireAdmin(requireUser(await currentUser(state)));
       const service = state.services.find((item) => item.slug === parsed.data.slug);
       if (!service) throw new Error("Service not found.");
-      await dbDeleteService(service.id);
       state.services = state.services.filter((item) => item.id !== service.id);
       state.packages = state.packages.filter((pack) => pack.serviceId !== service.id);
       state.deletedSlugs = Array.from(new Set([...(state.deletedSlugs ?? []), service.slug]));
@@ -1342,17 +1395,19 @@ function statsOf(state: NovaState): AdminStats {
   return {
     onlineSessions: state.users.filter((user) => Date.parse(user.lastSeenAt) > cutoff).length,
     serviceCount: state.services.length,
-    revenueCents: state.orders
-      .filter((order) => order.status !== "failed" && order.currency !== "SYP")
-      .reduce((sum, order) => sum + order.priceCents, 0),
-    revenueSypCents: state.orders
-      .filter((order) => order.status !== "failed" && order.currency === "SYP")
-      .reduce((sum, order) => sum + order.priceCents, 0),
+    // USD-equivalent: SYP orders are converted with the current store rate.
+    revenueCents: Math.round(
+      state.orders
+        .filter((order) => order.status !== "failed")
+        .reduce(
+          (sum, order) =>
+            sum + (order.currency === "SYP" ? order.priceCents / (state.sypRate || DEFAULT_SYP_RATE_VALUE) : order.priceCents),
+          0,
+        ),
+    ),
     recent,
   };
 }
-
-let usersBackfilled = false;
 
 function usersOf(state: NovaState): AdminUser[] {
   return [...state.users]
@@ -1363,8 +1418,8 @@ function usersOf(state: NovaState): AdminUser[] {
       username: user.username,
       email: user.email,
       role: user.role,
+      currency: asCurrency(user.currency),
       balanceCents: user.balanceCents,
-      currency: user.currency === "SYP" ? ("SYP" as const) : ("USD" as const),
       lastIp: user.lastIp,
       lastSeenAt: user.lastSeenAt,
       isBlocked: user.isBlocked === true,
@@ -1376,11 +1431,6 @@ export async function getAdminDashboard(): Promise<Ok<{ stats: AdminStats; users
     await ensureReady();
     const state = memory ?? (await loadAuthoritative());
     requireAdmin(requireUser(await currentUser(state)));
-    // Backfill the online users table (profile + currency + balance) once per session.
-    if (dbOnline && !usersBackfilled) {
-      usersBackfilled = true;
-      void dbUpsertUsers(state.users).catch(() => (usersBackfilled = false));
-    }
     return { ok: true, stats: statsOf(state), users: usersOf(state) };
   } catch (error) {
     return { ok: false, error: fail(error) };
@@ -1457,22 +1507,21 @@ export async function topUpUser(input: unknown): Promise<{ ok: true } | Err> {
       requireAdmin(actor);
       const target = state.users.find((user) => user.id === parsed.data.userId);
       if (!target) throw new Error("User not found.");
-      target.balanceCents = Math.min(BALANCE_CAP, target.balanceCents + parsed.data.cents);
+      target.balanceCents = Math.min(balanceCap(asCurrency(target.currency)), target.balanceCents + parsed.data.cents);
       pushTxn(state, {
         userId: target.id,
         kind: "admin_topup",
         cents: parsed.data.cents,
-        currency: target.currency,
         note: `Added by ${actor.username}`,
       });
       pushRequest(state, {
         userId: target.id,
         username: target.username,
         cents: parsed.data.cents,
-        currency: target.currency,
         status: "APPROVED",
         note: `Admin credit by ${actor.username}`,
         referenceNote: `Admin credit by ${actor.username}`,
+        currency: asCurrency(target.currency),
       });
       return { state, result: undefined };
     });
@@ -1501,17 +1550,13 @@ export async function approveBalanceRequest(input: unknown): Promise<{ ok: true 
       if (request.status !== "PROCESSING") throw new Error("That request is already closed.");
       const target = state.users.find((user) => user.id === request.userId);
       if (!target) throw new Error("User not found.");
-      if ((request.currency ?? "USD") !== target.currency) {
-        throw new Error("This request was made in a different currency than the user's wallet.");
-      }
-      target.balanceCents = Math.min(BALANCE_CAP, target.balanceCents + request.cents);
+      target.balanceCents = Math.min(balanceCap(asCurrency(target.currency)), target.balanceCents + request.cents);
       request.status = "APPROVED";
       request.resolvedAt = new Date().toISOString();
       pushTxn(state, {
         userId: target.id,
         kind: "self_topup",
         cents: request.cents,
-        currency: request.currency,
         note: `ShamCash ${request.referenceNote}`,
       });
       return { state, result: undefined };
@@ -1553,7 +1598,6 @@ export async function setShamcashAddress(input: unknown): Promise<{ ok: true } |
   try {
     await commit(async (state) => {
       requireAdmin(requireUser(await currentUser(state)));
-      await dbSaveSettings({ shamcashAddress: parsed.data.address });
       state.shamcashAddress = parsed.data.address;
       return { state, result: undefined };
     });
@@ -1580,7 +1624,6 @@ export async function setOffersTicker(input: unknown): Promise<{ ok: true } | Er
   try {
     await commit(async (state) => {
       requireAdmin(requireUser(await currentUser(state)));
-      await dbSaveSettings({ offersTickerText: parsed.data.text, offersTickerTextAr: parsed.data.textAr });
       state.offersTickerText = parsed.data.text;
       state.offersTickerTextAr = parsed.data.textAr;
       return { state, result: undefined };
@@ -1591,17 +1634,9 @@ export async function setOffersTicker(input: unknown): Promise<{ ok: true } | Er
   }
 }
 
-/* ---------------- Store settings, currency & named DB-first API ---------------- */
-
-export async function getStoreSettings(): Promise<StoreSettings> {
+export async function getSypRate(): Promise<number> {
   await ensureReady();
-  const state = memory ?? blankState();
-  return {
-    shamcashAddress: state.shamcashAddress || DEFAULT_SHAMCASH,
-    offersTickerText: state.offersTickerText || DEFAULT_TICKER_EN,
-    offersTickerTextAr: state.offersTickerTextAr || DEFAULT_TICKER_AR,
-    sypRate: state.sypRate,
-  };
+  return (memory ?? blankState()).sypRate || DEFAULT_SYP_RATE_VALUE;
 }
 
 export async function setSypRate(input: unknown): Promise<{ ok: true } | Err> {
@@ -1610,77 +1645,13 @@ export async function setSypRate(input: unknown): Promise<{ ok: true } | Err> {
   try {
     await commit(async (state) => {
       requireAdmin(requireUser(await currentUser(state)));
-      await dbSaveSettings({ sypRate: parsed.data.rate });
-      state.sypRate = parsed.data.rate;
+      state.sypRate = Math.round(parsed.data.rate * 100) / 100;
       return { state, result: undefined };
     });
     return { ok: true };
   } catch (error) {
     return { ok: false, error: fail(error) };
   }
-}
-
-/** Admin: patch any store setting. Writes to store_settings first, then the local cache. */
-export async function updateStoreSettings(
-  patch: Partial<Pick<StoreSettings, "shamcashAddress" | "offersTickerText" | "offersTickerTextAr" | "sypRate">>,
-): Promise<{ ok: true } | Err> {
-  if (patch.shamcashAddress !== undefined) {
-    const result = await setShamcashAddress({ address: patch.shamcashAddress });
-    if (!result.ok) return result;
-  }
-  if (patch.offersTickerText !== undefined || patch.offersTickerTextAr !== undefined) {
-    const current = await getOffersTicker();
-    const result = await setOffersTicker({
-      text: patch.offersTickerText ?? current.text,
-      textAr: patch.offersTickerTextAr ?? current.textAr,
-    });
-    if (!result.ok) return result;
-  }
-  if (patch.sypRate !== undefined) {
-    const result = await setSypRate({ rate: patch.sypRate });
-    if (!result.ok) return result;
-  }
-  return { ok: true };
-}
-
-export async function createService(input: Omit<ServiceWrite, "id">): Promise<Ok<{ slug: string }> | Err> {
-  return saveServiceAction({ ...input, id: undefined });
-}
-
-export async function updateService(input: ServiceWrite & { id: string }): Promise<Ok<{ slug: string }> | Err> {
-  return saveServiceAction(input);
-}
-
-export async function deleteService(slug: string): Promise<{ ok: true } | Err> {
-  return deleteServiceAction({ slug });
-}
-
-/** Forces a fresh read of catalog + settings from the online database (falls back to the local copy). */
-export async function fetchStoreState(): Promise<{
-  online: boolean;
-  services: CatalogService[];
-  settings: StoreSettings;
-}> {
-  await ensureReady();
-  await enqueue(async () => {
-    const overlay = await overlayDb(cloneState(memory ?? blankState()));
-    if (overlay.changed && !writing) {
-      memory = overlay.state;
-      writeLocal(memory);
-      emit();
-    }
-  });
-  return { online: dbOnline, services: await getViewerCatalog(), settings: await getStoreSettings() };
-}
-
-/** Visitor-only currency preview. Signed-in users always see their account currency. */
-export function setVisitorCurrency(currency: Currency): void {
-  writePreviewCurrency(currency);
-  emit();
-}
-
-export function getVisitorCurrency(): Currency {
-  return readPreviewCurrency();
 }
 
 export const seededServiceCount = SEED_SERVICES.length;

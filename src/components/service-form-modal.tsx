@@ -3,9 +3,10 @@ import { Plus, Trash2, X } from "lucide-react";
 import { toast } from "sonner";
 
 import { ServiceMark } from "@/components/service-mark";
-import { deleteServiceAction, getAdminService, getStoreSettings, saveServiceAction } from "@/lib/store/api";
+import { deleteServiceAction, getAdminService, getCloudWarning, getSypRate, saveServiceAction } from "@/lib/store/api";
+import { useI18n } from "@/lib/i18n";
 import { PRESET_COVERS } from "@/lib/store/data";
-import { DEFAULT_SYP_RATE, centsToField as sypToField, dollarsToCents, formatSyp, usdToSypCents } from "@/lib/money";
+import { DEFAULT_SYP_RATE, dollarsToCents, sypFromUsd } from "@/lib/money";
 import { useNovaUi } from "@/lib/ui-store";
 import { CATEGORIES, type Category } from "@/lib/store/types";
 
@@ -13,10 +14,8 @@ type PackDraft = {
   key: string;
   id?: string;
   sizeName: string;
-  /** USD */
   normal: string;
   vip: string;
-  /** New Syrian Pound; blank = auto from USD x rate */
   normalSyp: string;
   vipSyp: string;
   apiEndpoint: string;
@@ -47,6 +46,11 @@ function slugify(value: string) {
 
 function centsToField(cents: number) {
   return (cents / 100).toFixed(2);
+}
+
+/** SYP fields stay blank when the package follows "USD x rate". */
+function sypField(minor: number) {
+  return minor > 0 ? centsToField(minor) : "";
 }
 
 function blankPack(): PackDraft {
@@ -81,23 +85,20 @@ function emptyForm(): FormState {
 export function ServiceFormModal() {
   const serviceModal = useNovaUi((state) => state.serviceModal);
   const closeServiceModal = useNovaUi((state) => state.closeServiceModal);
+  const { t } = useI18n();
+  const [rate, setRate] = useState(DEFAULT_SYP_RATE);
   const [form, setForm] = useState<FormState>(emptyForm);
   const [slugLocked, setSlugLocked] = useState(false);
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [sypRate, setSypRate] = useState(DEFAULT_SYP_RATE);
-
-  useEffect(() => {
-    if (!serviceModal) return;
-    void getStoreSettings()
-      .then((settings) => setSypRate(settings.sypRate))
-      .catch(() => undefined);
-  }, [serviceModal]);
 
   useEffect(() => {
     if (!serviceModal) return;
     let cancel = false;
+    void getSypRate().then((value) => {
+      if (!cancel) setRate(value);
+    });
     if (serviceModal.mode === "create") {
       setForm(emptyForm());
       setSlugLocked(false);
@@ -132,8 +133,8 @@ export function ServiceFormModal() {
           sizeName: pack.sizeName,
           normal: centsToField(pack.normalPriceCents),
           vip: centsToField(pack.vipPriceCents),
-          normalSyp: sypToField(pack.normalPriceSypCents),
-          vipSyp: sypToField(pack.vipPriceSypCents),
+          normalSyp: sypField(pack.normalPriceSypCents),
+          vipSyp: sypField(pack.vipPriceSypCents),
           apiEndpoint: pack.apiEndpoint,
           apiSecretCode: pack.apiSecretCode,
         })),
@@ -166,13 +167,13 @@ export function ServiceFormModal() {
       const normalPriceCents = dollarsToCents(pack.normal);
       const vipPriceCents = dollarsToCents(pack.vip);
       if (normalPriceCents == null || vipPriceCents == null) {
-        setError("Each charge size needs USD prices like 4.99");
+        setError("Each charge size needs prices like 4.99");
         return;
       }
       const normalPriceSypCents = pack.normalSyp.trim() ? dollarsToCents(pack.normalSyp) : 0;
       const vipPriceSypCents = pack.vipSyp.trim() ? dollarsToCents(pack.vipSyp) : 0;
       if (normalPriceSypCents == null || vipPriceSypCents == null) {
-        setError("SYP prices must be numbers like 1200 (or leave blank to use the rate).");
+        setError(t.pricesHint);
         return;
       }
       packages.push({
@@ -206,26 +207,12 @@ export function ServiceFormModal() {
         return;
       }
       toast.success(form.id ? "Service updated" : "Service added");
+      const warning = getCloudWarning();
+      if (warning) toast.warning(warning);
       closeServiceModal();
     } finally {
       setBusy(false);
     }
-  }
-
-  /** Fills every SYP field from USD x the store rate (admin can still edit them after). */
-  function fillSypFromRate() {
-    setForm((current) => ({
-      ...current,
-      packages: current.packages.map((pack) => {
-        const usd = dollarsToCents(pack.normal);
-        const vip = dollarsToCents(pack.vip);
-        return {
-          ...pack,
-          normalSyp: usd == null ? pack.normalSyp : sypToField(usdToSypCents(usd, sypRate)),
-          vipSyp: vip == null ? pack.vipSyp : sypToField(usdToSypCents(vip, sypRate)),
-        };
-      }),
-    }));
   }
 
   async function remove() {
@@ -238,6 +225,8 @@ export function ServiceFormModal() {
         return;
       }
       toast.success("Service deleted");
+      const warning = getCloudWarning();
+      if (warning) toast.warning(warning);
       closeServiceModal();
     } finally {
       setBusy(false);
@@ -250,7 +239,7 @@ export function ServiceFormModal() {
         role="dialog"
         aria-modal="true"
         aria-labelledby="service-form-title"
-        className="glass nova-grid-border mx-auto my-4 w-full max-w-3xl rounded-[1.75rem] border border-violet/30 p-5 shadow-[0_0_50px_-16px_rgba(139,92,246,0.9)] sm:p-6"
+        className="nova-grid-border glass mx-auto my-4 w-full max-w-3xl rounded-[1.75rem] border border-violet/30 p-5 shadow-[0_0_50px_-16px_rgba(139,92,246,0.9)] sm:p-6"
       >
         <div className="flex items-start justify-between gap-3">
           <div className="flex items-center gap-3">
@@ -287,9 +276,6 @@ export function ServiceFormModal() {
                   }}
                 />
               </Field>
-              <Field label="Arabic name · الاسم بالعربية">
-                <input className="field" dir="rtl" value={form.nameAr} onChange={(event) => patch({ nameAr: event.target.value })} />
-              </Field>
               <Field label="Slug">
                 <input
                   className="field"
@@ -316,14 +302,14 @@ export function ServiceFormModal() {
             <Field label="Description">
               <textarea className="field min-h-20" value={form.description} onChange={(event) => patch({ description: event.target.value })} />
             </Field>
-            <Field label="Arabic description · الوصف بالعربية">
-              <textarea
-                className="field min-h-20"
-                dir="rtl"
-                value={form.descriptionAr}
-                onChange={(event) => patch({ descriptionAr: event.target.value })}
-              />
-            </Field>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <Field label={t.nameArLabel}>
+                <input className="field" dir="rtl" value={form.nameAr} onChange={(event) => patch({ nameAr: event.target.value })} />
+              </Field>
+              <Field label={t.descriptionArLabel}>
+                <textarea className="field min-h-20" dir="rtl" value={form.descriptionAr} onChange={(event) => patch({ descriptionAr: event.target.value })} />
+              </Field>
+            </div>
             <Field label="Checkout instructions">
               <textarea className="field min-h-20" value={form.instructions} onChange={(event) => patch({ instructions: event.target.value })} />
             </Field>
@@ -369,10 +355,12 @@ export function ServiceFormModal() {
                         setError("Use an image under 4 MB.");
                         return;
                       }
-                      // Shrink to a compact icon so the base64 fits in the online database row.
-                      void compressImage(file)
-                        .then((value) => patch({ imageUrl: value }))
-                        .catch(() => setError("That image could not be read. Try a PNG, JPG or WebP."));
+                      const reader = new FileReader();
+                      reader.onload = () => {
+                        const value = typeof reader.result === "string" ? reader.result : "";
+                        if (value.startsWith("data:image/")) patch({ imageUrl: value });
+                      };
+                      reader.readAsDataURL(file);
                     }}
                   />
                 </label>
@@ -392,20 +380,8 @@ export function ServiceFormModal() {
               ) : null}
             </div>
 
-            <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
-              <div>
-                <h3 className="font-display text-xl font-extrabold">Charge sizes</h3>
-                <p className="text-xs text-muted">
-                  Prices in USD ($) and New Syrian Pound (ل.س). Blank SYP = USD × {sypRate} (1 USD = {formatSyp(sypRate * 100, "en")}).
-                </p>
-              </div>
-              <button
-                type="button"
-                onClick={fillSypFromRate}
-                className="inline-flex min-h-11 items-center gap-1 rounded-full border border-white/15 px-3 text-sm font-semibold"
-              >
-                Fill SYP from rate
-              </button>
+            <div className="mt-2 flex items-center justify-between">
+              <h3 className="font-display text-xl font-extrabold">Charge sizes</h3>
               <button
                 type="button"
                 disabled={form.packages.length >= 12}
@@ -433,20 +409,36 @@ export function ServiceFormModal() {
                   <div className="grid gap-2 sm:grid-cols-2">
                     <input className="field" placeholder="Size name" value={pack.sizeName} onChange={(event) => patchPack(pack.key, { sizeName: event.target.value })} />
                     <input className="field" placeholder="API secret code" value={pack.apiSecretCode} onChange={(event) => patchPack(pack.key, { apiSecretCode: event.target.value })} />
-                    <PriceInput label="Normal · USD $" placeholder="4.99" value={pack.normal} onChange={(value) => patchPack(pack.key, { normal: value })} />
-                    <PriceInput label="VIP · USD $" placeholder="3.99" value={pack.vip} onChange={(value) => patchPack(pack.key, { vip: value })} />
-                    <PriceInput
-                      label="Normal · SYP ل.س"
-                      placeholder={autoSyp(pack.normal, sypRate)}
-                      value={pack.normalSyp}
-                      onChange={(value) => patchPack(pack.key, { normalSyp: value })}
-                    />
-                    <PriceInput
-                      label="VIP · SYP ل.س"
-                      placeholder={autoSyp(pack.vip, sypRate)}
-                      value={pack.vipSyp}
-                      onChange={(value) => patchPack(pack.key, { vipSyp: value })}
-                    />
+                    <label className="block text-[11px] font-bold tracking-[0.12em] text-muted uppercase">
+                      {t.priceUsdNormal}
+                      <input className="field mt-1 normal-case" placeholder="4.99" dir="ltr" inputMode="decimal" value={pack.normal} onChange={(event) => patchPack(pack.key, { normal: event.target.value })} />
+                    </label>
+                    <label className="block text-[11px] font-bold tracking-[0.12em] text-muted uppercase">
+                      {t.priceUsdVip}
+                      <input className="field mt-1 normal-case" placeholder="3.99" dir="ltr" inputMode="decimal" value={pack.vip} onChange={(event) => patchPack(pack.key, { vip: event.target.value })} />
+                    </label>
+                    <label className="block text-[11px] font-bold tracking-[0.12em] text-muted uppercase">
+                      {t.priceSypNormal}
+                      <input className="field mt-1 normal-case" placeholder={t.priceSypAuto} dir="ltr" inputMode="decimal" value={pack.normalSyp} onChange={(event) => patchPack(pack.key, { normalSyp: event.target.value })} />
+                    </label>
+                    <label className="block text-[11px] font-bold tracking-[0.12em] text-muted uppercase">
+                      {t.priceSypVip}
+                      <input className="field mt-1 normal-case" placeholder={t.priceSypAuto} dir="ltr" inputMode="decimal" value={pack.vipSyp} onChange={(event) => patchPack(pack.key, { vipSyp: event.target.value })} />
+                    </label>
+                    <button
+                      type="button"
+                      className="min-h-10 rounded-full border border-violet/40 px-3 text-xs font-bold sm:col-span-2"
+                      onClick={() => {
+                        const normal = dollarsToCents(pack.normal);
+                        const vip = dollarsToCents(pack.vip);
+                        patchPack(pack.key, {
+                          normalSyp: normal == null ? pack.normalSyp : centsToField(sypFromUsd(normal, rate)),
+                          vipSyp: vip == null ? pack.vipSyp : centsToField(sypFromUsd(vip, rate)),
+                        });
+                      }}
+                    >
+                      {t.fillFromRate} (1 USD = {rate} SYP)
+                    </button>
                     <input
                       className="field sm:col-span-2"
                       placeholder="https://api.example.com/topup"
@@ -473,62 +465,6 @@ export function ServiceFormModal() {
         )}
       </div>
     </div>
-  );
-}
-
-async function compressImage(file: File, max = 384): Promise<string> {
-  const source = await new Promise<string>((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => (typeof reader.result === "string" ? resolve(reader.result) : reject(new Error("read")));
-    reader.onerror = () => reject(new Error("read"));
-    reader.readAsDataURL(file);
-  });
-  const image = await new Promise<HTMLImageElement>((resolve, reject) => {
-    const element = new Image();
-    element.onload = () => resolve(element);
-    element.onerror = () => reject(new Error("decode"));
-    element.src = source;
-  });
-  const scale = Math.min(1, max / Math.max(image.width, image.height));
-  const canvas = document.createElement("canvas");
-  canvas.width = Math.max(1, Math.round(image.width * scale));
-  canvas.height = Math.max(1, Math.round(image.height * scale));
-  const context = canvas.getContext("2d");
-  if (!context) return source;
-  context.drawImage(image, 0, 0, canvas.width, canvas.height);
-  const webp = canvas.toDataURL("image/webp", 0.86);
-  const output = webp.startsWith("data:image/webp") ? webp : canvas.toDataURL("image/png");
-  return output.length < source.length ? output : source;
-}
-
-function autoSyp(usd: string, rate: number): string {
-  const cents = dollarsToCents(usd);
-  return cents == null ? "auto" : `auto ${sypToField(usdToSypCents(cents, rate)) || "0"}`;
-}
-
-function PriceInput({
-  label,
-  value,
-  placeholder,
-  onChange,
-}: {
-  label: string;
-  value: string;
-  placeholder: string;
-  onChange: (value: string) => void;
-}) {
-  return (
-    <label className="block text-xs font-bold tracking-[0.12em] text-muted uppercase">
-      {label}
-      <input
-        className="field mt-1 font-normal tracking-normal normal-case"
-        dir="ltr"
-        inputMode="decimal"
-        placeholder={placeholder}
-        value={value}
-        onChange={(event) => onChange(event.target.value)}
-      />
-    </label>
   );
 }
 

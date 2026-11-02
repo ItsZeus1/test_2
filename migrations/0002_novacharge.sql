@@ -1,102 +1,90 @@
--- NovaCharge 0002: relational catalog, settings, user mirror, dual currency (USD + New Syrian Pound).
--- Run once in the Supabase SQL editor (safe to re-run).
+-- NovaCharge 0002: online source of truth for the catalog, store settings and the app-state row.
+-- Run once in the Supabase SQL editor (Dashboard -> SQL -> New query). Safe to re-run.
 --
--- Money columns are integer minor units ("cents"): USD cents and SYP piastres (1 SYP = 100).
--- SYP package prices of 0 mean "derive from USD x store_settings.syp_rate".
+-- SECURITY NOTE: NovaCharge runs entirely in the browser with the public anon key, so the policies
+-- below must let the anon role write. That means anyone who has the anon key can edit these rows.
+-- The provider API endpoint + secret code are intentionally NOT stored in the public tables
+-- (services / service_packages / store_settings). For real protection move admin writes behind a
+-- Supabase Edge Function or server route and tighten the policies to the service role.
 
--- Legacy state blob (auth, sessions, orders, wallets). Created here too in case 0001 was never run.
+-- 1) App-state row (accounts, wallets, orders, top-up requests, secrets). Already used by the app.
 create table if not exists public.novacharge_state (
-  id text primary key,
-  version integer not null default 0,
-  payload jsonb not null default '{}'::jsonb,
+  id         text primary key,
+  version    bigint      not null default 0,
+  payload    jsonb       not null,
   updated_at timestamptz not null default now()
 );
 
+-- 2) Catalog
 create table if not exists public.services (
-  id text primary key,
-  slug text not null unique,
-  name text not null,
-  name_ar text not null default '',
-  category text not null check (category in ('games', 'apps', 'subscriptions', 'mobile')),
-  description text not null default '',
-  description_ar text not null default '',
-  instructions text not null default '',
-  badge text,
-  image_url text not null default '', -- https URL or data:image/... base64 (uploads)
-  created_at timestamptz not null default now(),
-  updated_at timestamptz not null default now()
+  id             text primary key,
+  slug           text        not null unique,
+  name           text        not null,
+  name_ar        text        not null default '',
+  category       text        not null check (category in ('games','apps','subscriptions','mobile')),
+  description    text        not null default '',
+  description_ar text        not null default '',
+  instructions   text        not null default '',
+  badge          text,
+  image_url      text        not null default '',  -- https URL or data:image/... (uploaded photo)
+  created_at     timestamptz not null default now(),
+  updated_at     timestamptz not null default now()
 );
 
 create table if not exists public.service_packages (
-  id text primary key,
-  service_id text not null references public.services (id) on delete cascade,
-  size_name text not null,
-  price_usd_cents integer not null default 0 check (price_usd_cents >= 0),
-  vip_price_usd_cents integer not null default 0 check (vip_price_usd_cents >= 0),
-  price_syp_cents bigint not null default 0 check (price_syp_cents >= 0),
-  vip_price_syp_cents bigint not null default 0 check (vip_price_syp_cents >= 0),
-  api_endpoint text not null default '',
-  api_secret_code text not null default '',
-  sort_order integer not null default 0,
-  updated_at timestamptz not null default now()
+  id                  text primary key,
+  service_id          text   not null references public.services(id) on delete cascade,
+  size_name           text   not null,
+  price_usd_cents     bigint not null default 0,   -- normal price, USD cents
+  vip_price_usd_cents bigint not null default 0,   -- VIP price, USD cents
+  price_syp_cents     bigint not null default 0,   -- normal price, New SYP x100 (0 = USD x syp_rate)
+  vip_price_syp_cents bigint not null default 0,   -- VIP price, New SYP x100 (0 = USD x syp_rate)
+  sort_order          int    not null default 0,
+  updated_at          timestamptz not null default now()
 );
-create index if not exists service_packages_service_id_idx on public.service_packages (service_id, sort_order);
+create index if not exists service_packages_service_idx on public.service_packages(service_id);
 
--- Existing installs: add the SYP columns if the table predates this migration.
-alter table public.service_packages add column if not exists price_syp_cents bigint not null default 0;
-alter table public.service_packages add column if not exists vip_price_syp_cents bigint not null default 0;
-
+-- 3) Store settings (single row)
 create table if not exists public.store_settings (
-  id text primary key default 'primary',
-  shamcash_address text not null default '',
-  offers_ticker_text text not null default '',
-  offers_ticker_text_ar text not null default '',
-  syp_rate numeric(12, 4) not null default 120 check (syp_rate > 0), -- SYP per 1 USD
-  catalog_seeded boolean not null default false,
-  updated_at timestamptz not null default now()
+  id                    text primary key,
+  shamcash_address      text    not null default '',
+  offers_ticker_text    text    not null default '',
+  offers_ticker_text_ar text    not null default '',
+  syp_rate              numeric not null default 110,   -- New SYP per 1 USD (placeholder, set it in Admin)
+  deleted_slugs         jsonb   not null default '[]'::jsonb,
+  state_version         bigint  not null default 0,
+  updated_at            timestamptz not null default now()
 );
-alter table public.store_settings add column if not exists syp_rate numeric(12, 4) not null default 120;
-alter table public.store_settings add column if not exists catalog_seeded boolean not null default false;
-insert into public.store_settings (id) values ('primary') on conflict (id) do nothing;
 
--- Profile mirror (no password material). Wallet balance is in the user's own currency.
-create table if not exists public.users (
-  id text primary key,
-  name text not null default '',
-  username text not null,
-  email text not null unique,
-  phone text not null default '',
-  role text not null default 'NORMAL' check (role in ('NORMAL', 'VIP', 'ADMIN')),
-  currency text not null default 'USD' check (currency in ('USD', 'SYP')),
-  balance_cents bigint not null default 0,
-  is_blocked boolean not null default false,
-  created_at timestamptz not null default now(),
-  updated_at timestamptz not null default now()
-);
-alter table public.users add column if not exists currency text not null default 'USD';
-
--- Row level security. NovaCharge currently authenticates in-app with the anon key, so the
--- anon role needs read/write. Tighten these once auth moves to Supabase Auth or a server.
-alter table public.novacharge_state enable row level security;
-alter table public.services enable row level security;
-alter table public.service_packages enable row level security;
-alter table public.store_settings enable row level security;
-alter table public.users enable row level security;
-
+-- 4) Row level security + anon policies
 do $$
-declare
-  t text;
+declare t text;
 begin
-  foreach t in array array['novacharge_state', 'services', 'service_packages', 'store_settings', 'users'] loop
-    execute format('drop policy if exists %I on public.%I', t || '_anon_all', t);
-    execute format(
-      'create policy %I on public.%I for all to anon, authenticated using (true) with check (true)',
-      t || '_anon_all',
-      t
-    );
+  foreach t in array array['novacharge_state','services','service_packages','store_settings'] loop
+    execute format('alter table public.%I enable row level security', t);
+    execute format('drop policy if exists "nova_read"   on public.%I', t);
+    execute format('drop policy if exists "nova_insert" on public.%I', t);
+    execute format('drop policy if exists "nova_update" on public.%I', t);
+    execute format('drop policy if exists "nova_delete" on public.%I', t);
+    execute format('create policy "nova_read"   on public.%I for select to anon, authenticated using (true)', t);
+    execute format('create policy "nova_insert" on public.%I for insert to anon, authenticated with check (true)', t);
+    execute format('create policy "nova_update" on public.%I for update to anon, authenticated using (true) with check (true)', t);
+    execute format('create policy "nova_delete" on public.%I for delete to anon, authenticated using (true)', t);
   end loop;
 end $$;
 
-grant select, insert, update, delete on
-  public.novacharge_state, public.services, public.service_packages, public.store_settings, public.users
-  to anon, authenticated;
+grant select, insert, update, delete on public.novacharge_state, public.services,
+  public.service_packages, public.store_settings to anon, authenticated;
+
+-- 5) Storage fallback bucket (used only if the state table is unavailable)
+insert into storage.buckets (id, name, public, file_size_limit)
+values ('novacharge', 'novacharge', true, 5242880)
+on conflict (id) do nothing;
+
+drop policy if exists "novacharge_storage_all" on storage.objects;
+create policy "novacharge_storage_all" on storage.objects
+  for all to anon, authenticated
+  using (bucket_id = 'novacharge') with check (bucket_id = 'novacharge');
+
+-- 6) Make PostgREST pick up the new tables immediately
+notify pgrst, 'reload schema';

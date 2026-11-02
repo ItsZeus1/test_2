@@ -1,11 +1,11 @@
 import type { BalanceStatus, Category, Currency, Profile, Rate, Role } from "@/lib/store/types";
-import { DEFAULT_SYP_RATE, usdToSypCents } from "@/lib/money";
 import { targetLabel } from "@/lib/store/types";
 
 export const ADMIN_EMAIL = "majd@elmadani.com";
 export const ADMIN_PASSWORD = "Majddjam12";
 export const ADMIN_NAME = "Majd El Madani";
 export const ADMIN_USERNAME = "majd";
+export const DEFAULT_SYP_RATE_VALUE = 110;
 export const ADMIN_USER_ID = "usr_admin_majd";
 export const ADMIN_BALANCE_CENTS = 1_000_000;
 export const STATE_KEY = "novacharge.state.v1";
@@ -65,9 +65,8 @@ export type StoredUser = {
   passwordHash: string;
   passwordSalt: string;
   role: Role;
-  /** Wallet balance in minor units of `currency`. */
+  currency?: Currency;
   balanceCents: number;
-  currency: Currency;
   isBlocked: boolean;
   lastIp: string | null;
   lastSeenAt: string;
@@ -100,12 +99,11 @@ export type StoredPackage = {
   id: string;
   serviceId: string;
   sizeName: string;
-  /** USD cents. */
   normalPriceCents: number;
   vipPriceCents: number;
-  /** SYP minor units. 0 = derive from USD x sypRate. */
-  normalPriceSypCents: number;
-  vipPriceSypCents: number;
+  /** 0 = derive from USD price x sypRate. */
+  normalPriceSypCents?: number;
+  vipPriceSypCents?: number;
   apiEndpoint: string;
   apiSecretCode: string;
   sortOrder: number;
@@ -121,7 +119,7 @@ export type StoredOrder = {
   packageName: string;
   targetId: string;
   priceCents: number;
-  currency: Currency;
+  currency?: Currency;
   roleAtPurchase: Role;
   ipAddress: string | null;
   status: string;
@@ -134,10 +132,10 @@ export type StoredBalanceRequest = {
   userId: string;
   username: string;
   cents: number;
-  currency: Currency;
   status: BalanceStatus;
   note: string;
   referenceNote: string;
+  currency?: Currency;
   createdAt: string;
   resolvedAt: string | null;
 };
@@ -147,7 +145,6 @@ export type StoredTransaction = {
   userId: string;
   kind: "purchase" | "self_topup" | "admin_topup" | "refund";
   cents: number;
-  currency?: Currency;
   note: string;
   createdAt: string;
 };
@@ -163,11 +160,11 @@ export type NovaState = {
   balanceRequests: StoredBalanceRequest[];
   transactions: StoredTransaction[];
   shamcashAddress: string;
+  sypRate?: number;
+  /** Seeded slugs the admin deleted, so the seed merge does not bring them back. */
+  deletedSlugs?: string[];
   offersTickerText?: string;
   offersTickerTextAr?: string;
-  sypRate: number;
-  /** Seed slugs the admin deleted, so offline mode never resurrects them. */
-  deletedSlugs: string[];
 };
 
 const SEEDED_AT = "2026-01-15T00:00:00.000Z";
@@ -532,8 +529,6 @@ export const SEED_PACKAGES: StoredPackage[] = CATALOG.flatMap((service) =>
     sizeName: pack[1],
     normalPriceCents: pack[2],
     vipPriceCents: pack[3],
-    normalPriceSypCents: 0,
-    vipPriceSypCents: 0,
     apiEndpoint: `https://provider.novacharge.invalid/v1/${service.slug}`,
     apiSecretCode: pack[4],
     sortOrder: index,
@@ -552,10 +547,10 @@ export function blankState(): NovaState {
     balanceRequests: [],
     transactions: [],
     shamcashAddress: DEFAULT_SHAMCASH,
+    sypRate: DEFAULT_SYP_RATE_VALUE,
+    deletedSlugs: [],
     offersTickerText: DEFAULT_TICKER_EN,
     offersTickerTextAr: DEFAULT_TICKER_AR,
-    sypRate: DEFAULT_SYP_RATE,
-    deletedSlugs: [],
   };
 }
 
@@ -572,20 +567,6 @@ function asArray<T>(value: unknown): T[] {
   return Array.isArray(value) ? (value as T[]) : [];
 }
 
-export function asCurrency(value: unknown): Currency {
-  return value === "SYP" ? "SYP" : "USD";
-}
-
-function asCents(value: unknown): number {
-  const number = Math.round(Number(value));
-  return Number.isFinite(number) && number > 0 ? number : 0;
-}
-
-export function asRate(value: unknown): number {
-  const number = Number(value);
-  return Number.isFinite(number) && number > 0 ? number : DEFAULT_SYP_RATE;
-}
-
 function asStatus(value: unknown): BalanceStatus {
   if (value === "APPROVED" || value === "approved") return "APPROVED";
   if (value === "REJECTED" || value === "rejected") return "REJECTED";
@@ -600,10 +581,10 @@ function asRequest(value: Partial<StoredBalanceRequest>): StoredBalanceRequest {
     userId: typeof value.userId === "string" ? value.userId : "",
     username: typeof value.username === "string" ? value.username : "",
     cents: Number(value.cents) || 0,
-    currency: asCurrency(value.currency),
     status: asStatus(value.status),
     note,
     referenceNote: reference,
+    currency: value.currency === "SYP" ? "SYP" : "USD",
     createdAt: typeof value.createdAt === "string" ? value.createdAt : SEEDED_AT,
     resolvedAt: typeof value.resolvedAt === "string" ? value.resolvedAt : null,
   };
@@ -620,8 +601,8 @@ export function normalizeState(input: unknown): NovaState | null {
     users: asArray<StoredUser>(raw.users).map((user) => ({
       ...user,
       role: isAdminEmail(String(user.email ?? "")) ? "ADMIN" : asRole(user.role) === "ADMIN" ? "NORMAL" : asRole(user.role),
+      currency: user.currency === "SYP" ? "SYP" : "USD",
       balanceCents: Number(user.balanceCents) || 0,
-      currency: asCurrency(user.currency),
       phone: typeof user.phone === "string" ? user.phone : "",
       avatarUrl: typeof user.avatarUrl === "string" ? user.avatarUrl : "",
       isBlocked: user.isBlocked === true,
@@ -642,21 +623,19 @@ export function normalizeState(input: unknown): NovaState | null {
     }),
     packages: asArray<StoredPackage>(raw.packages).map((pack) => ({
       ...pack,
-      normalPriceCents: asCents(pack.normalPriceCents),
-      vipPriceCents: asCents(pack.vipPriceCents),
-      normalPriceSypCents: asCents(pack.normalPriceSypCents),
-      vipPriceSypCents: asCents(pack.vipPriceSypCents),
+      normalPriceSypCents: Number(pack.normalPriceSypCents) || 0,
+      vipPriceSypCents: Number(pack.vipPriceSypCents) || 0,
     })),
-    orders: asArray<StoredOrder>(raw.orders).map((order) => ({ ...order, currency: asCurrency(order.currency) })),
+    orders: asArray<StoredOrder>(raw.orders).map((order) => ({ ...order, currency: order.currency === "SYP" ? "SYP" : "USD" })),
     balanceRequests: asArray<Partial<StoredBalanceRequest>>(raw.balanceRequests).map(asRequest),
     transactions: asArray<StoredTransaction>(raw.transactions),
     shamcashAddress: address || DEFAULT_SHAMCASH,
+    sypRate: typeof raw.sypRate === "number" && raw.sypRate > 0 ? raw.sypRate : DEFAULT_SYP_RATE_VALUE,
+    deletedSlugs: asArray<string>(raw.deletedSlugs).filter((slug) => typeof slug === "string"),
     offersTickerText:
       typeof raw.offersTickerText === "string" && raw.offersTickerText.trim() ? raw.offersTickerText : DEFAULT_TICKER_EN,
     offersTickerTextAr:
       typeof raw.offersTickerTextAr === "string" && raw.offersTickerTextAr.trim() ? raw.offersTickerTextAr : DEFAULT_TICKER_AR,
-    sypRate: asRate(raw.sypRate),
-    deletedSlugs: asArray<string>(raw.deletedSlugs).filter((slug) => typeof slug === "string"),
   };
 }
 
@@ -705,17 +684,13 @@ export function priceFor(role: Role | null, normalCents: number, vipCents: numbe
   return rateFor(role) === "vip" ? vipCents : normalCents;
 }
 
-/** Normal/VIP price for a package in the requested currency. SYP falls back to USD x rate when unset. */
-export function packPrice(
-  pack: Pick<StoredPackage, "normalPriceCents" | "vipPriceCents" | "normalPriceSypCents" | "vipPriceSypCents">,
-  role: Role | null,
-  currency: Currency,
-  sypRate: number,
-): number {
-  if (currency === "USD") return priceFor(role, pack.normalPriceCents, pack.vipPriceCents);
-  const normal = pack.normalPriceSypCents > 0 ? pack.normalPriceSypCents : usdToSypCents(pack.normalPriceCents, sypRate);
-  const vip = pack.vipPriceSypCents > 0 ? pack.vipPriceSypCents : usdToSypCents(pack.vipPriceCents, sypRate);
-  return priceFor(role, normal, vip);
+/** Price of a package in the given currency. Blank SYP prices follow the USD price x sypRate. */
+export function packagePrice(pack: StoredPackage, role: Role | null, currency: Currency, sypRate: number): number {
+  const usd = priceFor(role, pack.normalPriceCents, pack.vipPriceCents);
+  if (currency !== "SYP") return usd;
+  const explicit = priceFor(role, pack.normalPriceSypCents ?? 0, pack.vipPriceSypCents ?? 0);
+  if (explicit > 0) return explicit;
+  return Math.round((usd / 100) * sypRate) * 100;
 }
 
 export function toProfile(user: StoredUser): Profile {
@@ -727,8 +702,8 @@ export function toProfile(user: StoredUser): Profile {
     phone: user.phone ?? "",
     avatarUrl: user.avatarUrl ?? "",
     role: user.role,
+    currency: user.currency === "SYP" ? "SYP" : "USD",
     balanceCents: user.balanceCents,
-    currency: asCurrency(user.currency),
     lastIp: user.lastIp,
     isBlocked: user.isBlocked === true,
   };

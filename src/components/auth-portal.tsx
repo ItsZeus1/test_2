@@ -2,9 +2,9 @@ import { useState, type FormEvent } from "react";
 import { useNavigate } from "@tanstack/react-router";
 
 import { useI18n } from "@/lib/i18n";
+import type { Currency } from "@/lib/store/types";
 import { loginAccount, registerAccount } from "@/lib/store/api";
 import { loginSchema, registerSchema, zodError } from "@/lib/validation";
-import type { Currency } from "@/lib/store/types";
 
 type Tab = "login" | "register";
 
@@ -54,11 +54,7 @@ export function AuthPortal({ initialTab = "login" }: { initialTab?: Tab }) {
   async function onRegister(event: FormEvent) {
     event.preventDefault();
     setError(null);
-    if (!currency) {
-      setError(t.chooseCurrency);
-      return;
-    }
-    const parsed = registerSchema.safeParse({ name, username, email, password, confirmPassword, currency });
+    const parsed = registerSchema.safeParse({ name, username, email, password, confirmPassword, currency: currency || undefined });
     if (!parsed.success) {
       setError(zodError(parsed.error));
       return;
@@ -79,7 +75,7 @@ export function AuthPortal({ initialTab = "login" }: { initialTab?: Tab }) {
   }
 
   return (
-    <div className="glass nova-grid-border mx-auto w-[95vw] rounded-3xl p-5 sm:max-w-md sm:p-6">
+    <div className="glass mx-auto w-[95vw] rounded-3xl p-5 sm:max-w-md sm:p-6">
       <div className="mb-5 grid grid-cols-2 rounded-full bg-black/30 p-1">
         {(["login", "register"] as const).map((item) => (
           <button
@@ -160,41 +156,33 @@ export function AuthPortal({ initialTab = "login" }: { initialTab?: Tab }) {
                 autoComplete="new-password"
               />
             </label>
-            <fieldset className="block">
-              <legend className="text-sm text-muted">
-                {t.accountCurrency} <span className="text-rose-300">*</span>
+            <fieldset className="text-sm text-muted">
+              <legend className="mb-1">
+                {t.currencyLabel} <span className="text-rose-500" aria-hidden>*</span>
               </legend>
-              <div role="radiogroup" aria-required="true" className="mt-1 grid grid-cols-1 gap-2 sm:grid-cols-2">
-                {(
-                  [
-                    { code: "USD", symbol: "$", label: t.usdOption },
-                    { code: "SYP", symbol: "ل.س", label: t.sypOption },
-                  ] as const
-                ).map((option) => {
-                  const active = currency === option.code;
-                  return (
-                    <button
-                      key={option.code}
-                      type="button"
-                      role="radio"
-                      aria-checked={active}
-                      onClick={() => {
-                        setCurrency(option.code);
-                        setError(null);
-                      }}
-                      className={`nova-grid-border flex min-h-14 items-center gap-3 rounded-2xl border px-3 text-start text-sm ${
-                        active ? "border-violet bg-violet/15 font-semibold" : "border-white/10 bg-white/5"
-                      }`}
-                    >
-                      <span className="grid size-9 shrink-0 place-items-center rounded-xl bg-gradient-to-br from-violet to-fuchsia text-sm font-extrabold text-white">
-                        {option.symbol}
-                      </span>
-                      <span className="min-w-0 leading-tight">{option.label}</span>
-                    </button>
-                  );
-                })}
+              <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                {([
+                  ["USD", t.currencyUsd],
+                  ["SYP", t.currencySyp],
+                ] as const).map(([id, label]) => (
+                  <label
+                    key={id}
+                    className={`flex min-h-12 cursor-pointer items-center gap-2 rounded-2xl border px-3 py-2 text-start text-xs font-semibold leading-snug ${currency === id ? "border-violet bg-violet/10 text-fg" : "border-white/10 bg-white/5"}`}
+                  >
+                    <input
+                      type="radio"
+                      name="currency"
+                      value={id}
+                      required
+                      checked={currency === id}
+                      onChange={() => setCurrency(id)}
+                      className="size-4 shrink-0 accent-violet"
+                    />
+                    <span className="min-w-0">{label}</span>
+                  </label>
+                ))}
               </div>
-              <p className="mt-1 text-xs text-muted">{t.currencyHint}</p>
+              <p className="mt-1 text-xs">{t.currencyHint}</p>
             </fieldset>
           </>
         ) : null}
