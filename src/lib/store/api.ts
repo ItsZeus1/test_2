@@ -1384,30 +1384,104 @@ export async function registerAccount(input: unknown): Promise<Ok<{ token: strin
   }
 }
 
-export async function loginAccount(input: unknown): Promise<Ok<{ token: string; profile: Profile }> | Err> {
+/* ------------------------------ v27: sign-in security ------------------------------ */
+
+const MAX_FAILED_LOGINS = 3;
+const MAX_DAILY_LOGINS = 3;
+
+/** Calendar day in Damascus time, so "per day" matches the customer's own day. */
+function damascusDay(date = new Date()): string {
+  return new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Damascus", year: "numeric", month: "2-digit", day: "2-digit" }).format(date);
+}
+
+const LOGIN_TEXT = {
+  ar: {
+    wrong: "البريد الإلكتروني أو كلمة المرور غير صحيحة.",
+    remaining: (left: number) => `كلمة المرور غير صحيحة. محاولات متبقية قبل قفل الحساب: ${left}`,
+    locked: "🔒 تم قفل هذا الحساب أمنياً بعد 3 محاولات خاطئة لكلمة المرور. يرجى التواصل مع الدعم الفني لفك القفل.",
+    daily: "⚠️ لقد وصلت للحد الأقصى لتسجيل الدخول اليومي (3 مرات في اليوم). يرجى المحاولة غداً أو التواصل مع الدعم الفني.",
+    blocked: "هذا الحساب موقوف.",
+  },
+  en: {
+    wrong: "Email or password is incorrect.",
+    remaining: (left: number) => `Wrong password. Attempts left before the account is locked: ${left}`,
+    locked: "🔒 This account has been locked after 3 failed password attempts. Please contact Live Support to unlock it.",
+    daily: "⚠️ You have reached the maximum daily sign-in limit (3 logins per day). Please try again tomorrow or contact support.",
+    blocked: "This account is blocked.",
+  },
+};
+
+/** Shared by password and Google sign-in: blocks a 4th sign-in today; admins are exempt. */
+function countDailyLogin(user: StoredUser, text: (typeof LOGIN_TEXT)["ar"]): string | null {
+  if (user.role === "ADMIN" || isAdminEmail(user.email)) return null;
+  const today = damascusDay();
+  if (user.lastLoginDate === today && (user.dailyLoginCount ?? 0) >= MAX_DAILY_LOGINS) return text.daily;
+  user.dailyLoginCount = user.lastLoginDate === today ? (user.dailyLoginCount ?? 0) + 1 : 1;
+  user.lastLoginDate = today;
+  return null;
+}
+
+/**
+ * Password sign-in with v27 protection:
+ *  - 3 wrong passwords in a row → account locked until an admin unlocks it (admins exempt);
+ *  - max 3 successful sign-ins per Damascus day (admins exempt);
+ *  - the counters are written in the same save as the check, so they persist for every device.
+ */
+export async function loginAccount(input: unknown, language: "ar" | "en" = "ar"): Promise<Ok<{ token: string; profile: Profile }> | Err> {
   const parsed = loginSchema.safeParse(input);
   if (!parsed.success) return { ok: false, error: zodError(parsed.error) };
+  const text = LOGIN_TEXT[language];
   try {
     const ip = await quickIp();
-    const token = await commit(async (state) => {
+    type LoginOutcome = { error: string } | { token: string };
+    const outcome = await commit<LoginOutcome>(async (state) => {
       const user = state.users.find((item) => item.email.toLowerCase() === parsed.data.email.toLowerCase());
-      if (!user) throw new Error("Email or password is incorrect.");
+      if (!user) throw new Error(text.wrong);
+      const exempt = user.role === "ADMIN" || isAdminEmail(user.email);
+      if (!exempt && user.isLocked) throw new Error(text.locked);
       const hashed = await hashPassword(parsed.data.password, user.passwordSalt);
       if (!safeEqual(hashed.passwordHash, user.passwordHash)) {
-        throw new Error("Email or password is incorrect.");
+        if (exempt) throw new Error(text.wrong);
+        // Wrong password: the counter is SAVED (no throw), then the error is shown.
+        user.failedLoginAttempts = (user.failedLoginAttempts ?? 0) + 1;
+        if (user.failedLoginAttempts >= MAX_FAILED_LOGINS) user.isLocked = true;
+        const error = user.isLocked ? text.locked : text.remaining(MAX_FAILED_LOGINS - user.failedLoginAttempts);
+        return { state, result: { error } };
       }
-      if (user.isBlocked) throw new Error("This account is blocked.");
+      if (user.isBlocked) throw new Error(text.blocked);
+      const daily = countDailyLogin(user, text);
+      if (daily) throw new Error(daily);
+      user.failedLoginAttempts = 0;
       user.lastIp = ip;
       user.lastSeenAt = new Date().toISOString();
       if (isAdminEmail(user.email)) user.role = "ADMIN";
       const issued = await openSession(state, user.id);
       writeToken(issued);
-      return { state, result: issued };
+      return { state, result: { token: issued } };
     });
+    if ("error" in outcome) return { ok: false, error: outcome.error };
     notifyAuth();
     const profile = await readProfile();
     if (!profile) return { ok: false, error: "Signed in, but the profile could not be read." };
-    return { ok: true, token, profile };
+    return { ok: true, token: outcome.token, profile };
+  } catch (error) {
+    return { ok: false, error: fail(error) };
+  }
+}
+
+/** Admin: unlock an account and reset its wrong-password and daily sign-in counters. */
+export async function adminUnlockUser(userId: string): Promise<Ok<Record<never, never>> | Err> {
+  try {
+    await commit(async (state) => {
+      requireAdmin(requireUser(await currentUser(state)));
+      const user = state.users.find((item) => item.id === userId);
+      if (!user) throw new Error("User not found.");
+      user.isLocked = false;
+      user.failedLoginAttempts = 0;
+      user.dailyLoginCount = 0;
+      return { state, result: undefined };
+    });
+    return { ok: true };
   } catch (error) {
     return { ok: false, error: fail(error) };
   }
@@ -1418,11 +1492,26 @@ export function notifyAuth(): void {
 }
 
 /**
- * v26 optimistic sign-out: the device forgets the session synchronously and the UI updates at
- * once; removing the server-side session record happens in the background and can never block.
+ * v27 complete sign-out (in order):
+ *  1. Supabase's own auth client is told to drop any in-memory session (local scope: instant,
+ *     no network). Email/password accounts never create a Supabase session — this covers the
+ *     Google flow and any leftover token.
+ *  2. The server-side session record is removed (awaited, capped at 4 s so a dead connection
+ *     can never trap the user).
+ *  3. Every local session key is cleared and listeners re-read the (now empty) profile.
  */
-export function logoutAccount(): Promise<void> {
+export async function logoutAccount(): Promise<void> {
   const token = readToken();
+  const client = getSupabase();
+  if (client) await client.auth.signOut({ scope: "local" }).catch(() => undefined);
+  if (token) {
+    const tokenHash = await sha256(token);
+    const removeSession = commit((state) => {
+      state.sessions = state.sessions.filter((session) => session.tokenHash !== tokenHash);
+      return { state, result: undefined };
+    }).catch(() => undefined);
+    await Promise.race([removeSession, new Promise((resolve) => setTimeout(resolve, 4000))]);
+  }
   writeToken(null);
   viewerCache = null;
   if (typeof window !== "undefined") {
@@ -1438,17 +1527,6 @@ export function logoutAccount(): Promise<void> {
     }
   }
   emit();
-  if (token) {
-    void sha256(token)
-      .then((tokenHash) =>
-        commit((state) => {
-          state.sessions = state.sessions.filter((session) => session.tokenHash !== tokenHash);
-          return { state, result: undefined };
-        }),
-      )
-      .catch(() => undefined);
-  }
-  return Promise.resolve();
 }
 
 /** Role + currency of the signed-in viewer, cached so pages can price things synchronously. */
@@ -1672,6 +1750,10 @@ export async function submitBalanceRequest(
     const request = await commit(async (state) => {
       const user = requireUser(await currentUser(state));
       assertCanTransact(user);
+      // v27: 30 s between top-up requests for the same account (any device).
+      const lastAt = Math.max(0, ...state.balanceRequests.filter((item) => item.userId === user.id).map((item) => Date.parse(item.createdAt) || 0));
+      const wait = Math.ceil((lastAt + 30_000 - Date.now()) / 1000);
+      if (wait > 0) throw new Error(`⏳ يرجى الانتظار ${wait} ثانية قبل إرسال طلب شحن جديد · Please wait ${wait} seconds before submitting another top-up request`);
       const duplicate = state.balanceRequests.some(
         (item) =>
           (item.method ?? "SHAMCASH") === method &&
@@ -1928,6 +2010,10 @@ function usersOf(state: NovaState): AdminUser[] {
       lastIp: user.lastIp,
       lastSeenAt: user.lastSeenAt,
       isBlocked: user.isBlocked === true,
+      isLocked: user.isLocked === true,
+      failedLoginAttempts: user.failedLoginAttempts ?? 0,
+      dailyLoginCount: user.lastLoginDate === damascusDay() ? (user.dailyLoginCount ?? 0) : 0,
+      lastLoginDate: user.lastLoginDate,
     }));
 }
 
@@ -2339,6 +2425,15 @@ const AUTO_REPLY = {
   en: "Welcome to ZovaCharge Live Support — we received your message! Our support team is online and ready to help, an agent will reply to you within seconds.",
 };
 
+/** v27: seconds left before this sender may post again (15 s between support messages). */
+function supportWait(messages: Array<{ sender: string; createdAt: string }>): number {
+  const last = Math.max(0, ...messages.filter((message) => message.sender === "USER").map((message) => Date.parse(message.createdAt) || 0));
+  return Math.ceil((last + 15_000 - Date.now()) / 1000);
+}
+function supportWaitError(wait: number): string {
+  return `⏳ انتظر ${wait} ثانية لإرسال رسالة جديدة... · Wait ${wait}s before sending another message...`;
+}
+
 /** v26: recovery tickets get an ownership-check reply instead of the generic welcome. */
 const RECOVERY_AUTO_REPLY = {
   ar: "أهلاً بك في قسم استعادة الحسابات الآمن 🔒 تم استلام بريدك ورقم هاتفك. لإتمام التحقق من ملكيتك للحساب وإعادة تعيين كلمة المرور فوراً، يرجى إرسال معلومتين على الأقل مما يلي في هذه المحادثة:\n• الاسم الكامل المسجل في الحساب\n• الرصيد التقريبي الحالي في محفظتك\n• آخر عملية شحن للمحفظة أو آخر لعبة/خدمة قمت بشرائها\n• أو إرفاق صورة لآخر إشعار تحويل قمت به عبر زر الكاميرا (📷) بالأسفل.",
@@ -2353,8 +2448,13 @@ export async function sendSupportMessage(input: unknown): Promise<Ok<{ ticket: S
     const ticket = await commit(async (state) => {
       const user = requireUser(await currentUser(state));
       if (user.isBlocked) throw new Error("This account is blocked.");
-      const now = new Date().toISOString();
       state.supportTickets = state.supportTickets ?? [];
+      // v27: 15 s between a customer's support messages (all their tickets); admins exempt.
+      if (user.role !== "ADMIN") {
+        const wait = supportWait(state.supportTickets.filter((item) => item.userId === user.id).flatMap((item) => item.messages));
+        if (wait > 0) throw new Error(supportWaitError(wait));
+      }
+      const now = new Date().toISOString();
       let target = parsed.data.ticketId
         ? state.supportTickets.find((item) => item.id === parsed.data.ticketId && item.userId === user.id && !item.hiddenForUser)
         : undefined;
@@ -2606,6 +2706,9 @@ export async function adminSetUserPassword(input: unknown): Promise<{ ok: true }
       if (!target) throw new Error("User not found.");
       target.passwordHash = hashed.passwordHash;
       target.passwordSalt = hashed.passwordSalt;
+      // v27: a new password from the admin (account recovery) also lifts the 3-strike lock.
+      target.isLocked = false;
+      target.failedLoginAttempts = 0;
       state.sessions = state.sessions.filter((session) => session.userId !== target.id);
       return { state, result: undefined };
     });
@@ -2759,6 +2862,8 @@ export async function listMyFeed(language: "ar" | "en" = "ar"): Promise<FeedItem
 export async function startGoogleSignIn(): Promise<{ ok: true } | Err> {
   const client = getSupabase();
   if (!client || typeof window === "undefined") return { ok: false, error: "Google sign-in needs Supabase to be configured on this site." };
+  // v27: drop any stale in-memory Supabase session first so the new sign-in starts clean.
+  await client.auth.signOut({ scope: "local" }).catch(() => undefined);
   const { error } = await client.auth.signInWithOAuth({
     provider: "google",
     options: { redirectTo: `${window.location.origin}/login?oauth=google`, queryParams: { prompt: "select_account" } },
@@ -2838,6 +2943,11 @@ export async function completeGoogleSignIn(): Promise<Ok<{ profile: Profile; isN
         user.lastSeenAt = now;
         if (isAdminEmail(user.email)) user.role = "ADMIN";
       }
+      // v27: the same lock and daily limit apply to Google sign-in.
+      const text = LOGIN_TEXT[document.documentElement.lang === "en" ? "en" : "ar"];
+      if (user.role !== "ADMIN" && user.isLocked) throw new Error(text.locked);
+      const daily = countDailyLogin(user, text);
+      if (daily) throw new Error(daily);
       const issued = await openSession(state, user.id);
       writeToken(issued);
       return { state, result: issued };
@@ -3123,6 +3233,8 @@ export async function sendGuestSupportMessage(text: string, imageId?: string): P
     const ticket = await commit(async (state) => {
       const target = findGuestTicket(state, session);
       if (!target || target.status === "CLOSED") throw new Error("This conversation has ended. Start a new recovery request.");
+      const wait = supportWait(target.messages);
+      if (wait > 0) throw new Error(supportWaitError(wait));
       const now = new Date().toISOString();
       messageId = randomId("msg");
       target.messages.push({ id: messageId, sender: "USER", text: clean, createdAt: now, ...(image ? { imageId: image } : {}) });

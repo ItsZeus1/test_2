@@ -3747,3 +3747,27 @@ html.lenis body {
 }
 .directory-chip:hover { color: #0369a1; box-shadow: inset 0 0 0 1px #38bdf8; }
 :root.dark .directory-chip { color: #e2e8f0; background: rgb(15 23 42 / 0.7); box-shadow: inset 0 0 0 1px rgb(255 255 255 / 0.12); }
+
+/* =====================================================================
+   v27 — Security check (CAPTCHA) + anti-spam cooldown line
+   Check box 16px with 12px padding → inner chips 16 − 12 = 4px would be too sharp; 12px for touch.
+   ===================================================================== */
+.security-check {
+  background: linear-gradient(180deg, #ffffff, #f1f5f9);
+  box-shadow: inset 0 0 0 1px #cbd5e1;
+  transition: box-shadow 200ms ease;
+}
+.security-check.is-solved { box-shadow: inset 0 0 0 1px rgb(16 185 129 / 0.55), 0 0 0 3px rgb(16 185 129 / 0.12); }
+:root.dark .security-check { background: rgb(15 23 42 / 0.7); box-shadow: inset 0 0 0 1px rgb(255 255 255 / 0.12); }
+.security-sum {
+  color: #0f172a;
+  background: #e2e8f0;
+  letter-spacing: 0.02em;
+}
+:root.dark .security-sum { color: #e0f2fe; background: rgb(30 41 59 / 0.9); }
+.cooldown-line {
+  color: #92400e;
+  background: rgb(245 158 11 / 0.12);
+  box-shadow: inset 0 0 0 1px rgb(245 158 11 / 0.35);
+}
+:root.dark .cooldown-line { color: #fcd34d; }

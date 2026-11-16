@@ -111,13 +111,19 @@ export function SignOutButton({ onDone, className = "" }: { onDone?: () => void;
   const [asking, setAsking] = useState(false);
   const [busy, setBusy] = useState(false);
 
-  /** v26: instant, never waits on the network (the server clean-up runs in the background). */
-  function signOut() {
-    void logoutAccount();
-    setBusy(false);
-    setAsking(false);
-    onDone?.();
-    void navigate({ to: "/" });
+  /** v27: complete sign-out — waits for the clean-up (max ~4 s), always ends on "/" as a guest. */
+  async function signOut() {
+    setBusy(true);
+    try {
+      await logoutAccount();
+    } catch {
+      /* the local session is gone either way */
+    } finally {
+      setBusy(false);
+      setAsking(false);
+      onDone?.();
+      void navigate({ to: "/" });
+    }
   }
 
   return (
@@ -137,7 +143,7 @@ export function SignOutButton({ onDone, className = "" }: { onDone?: () => void;
         title={language === "ar" ? "هل أنت متأكد من تسجيل الخروج؟" : "Are you sure you want to sign out?"}
         confirmLabel={t.signOut}
         onCancel={() => setAsking(false)}
-        onConfirm={signOut}
+        onConfirm={() => void signOut()}
       >
         {language === "ar" ? "يمكنك تسجيل الدخول مجدداً في أي وقت." : "You can sign back in at any time."}
       </ConfirmDialog>

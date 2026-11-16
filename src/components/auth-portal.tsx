@@ -1,8 +1,8 @@
 "use client";
 
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { useRouter } from "next/navigation";
-import { ArrowLeft, Banknote, Eye, EyeOff, KeyRound, MessageCircle } from "lucide-react";
+import { ArrowLeft, Banknote, Eye, EyeOff, KeyRound, MessageCircle, RefreshCw, ShieldCheck } from "lucide-react";
 
 import { ActionLoadingOverlay, HUD_FINISH_MS } from "@/components/action-loading-overlay";
 import { SyriaGreenFlagIcon } from "@/components/pay-emblem";
@@ -17,6 +17,159 @@ import { completeGoogleSignIn, completeProfile, loginAccount, openGuestRecoveryT
 import { MIN_AGE, SY_MOBILE, ageFromBirthDate, formatSyMobile, loginSchema, registerSchema, zodError } from "@/lib/validation";
 
 type Tab = "login" | "register";
+
+/* ============================ v27: security check (CAPTCHA) ============================ */
+
+/**
+ * Cloudflare Turnstile site key (the same key Supabase's CAPTCHA settings use). Until it is set
+ * in Vercel, a built-in challenge is shown instead, so the field works from day one.
+ */
+const CAPTCHA_SITE_KEY = (process.env.NEXT_PUBLIC_SUPABASE_CAPTCHA_SITE_KEY ?? process.env.NEXT_PUBLIC_TURNSTILE_SITE_KEY ?? "").trim();
+const TURNSTILE_SRC = "https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit";
+
+type TurnstileApi = {
+  render: (element: HTMLElement, options: Record<string, unknown>) => string;
+  reset: (widgetId?: string) => void;
+  remove: (widgetId: string) => void;
+};
+declare global {
+  interface Window {
+    turnstile?: TurnstileApi;
+  }
+}
+
+let turnstileLoader: Promise<TurnstileApi> | null = null;
+function loadTurnstile(): Promise<TurnstileApi> {
+  if (window.turnstile) return Promise.resolve(window.turnstile);
+  turnstileLoader ??= new Promise<TurnstileApi>((resolve, reject) => {
+    const script = document.createElement("script");
+    script.src = TURNSTILE_SRC;
+    script.async = true;
+    script.defer = true;
+    script.onload = () => (window.turnstile ? resolve(window.turnstile) : reject(new Error("Turnstile unavailable")));
+    script.onerror = () => {
+      turnstileLoader = null;
+      reject(new Error("Turnstile unavailable"));
+    };
+    document.head.appendChild(script);
+  });
+  return turnstileLoader;
+}
+
+/** What the form needs to know: a Turnstile token, or that the built-in check is solved. */
+export type CaptchaState = { kind: "turnstile"; token: string } | { kind: "local" } | null;
+
+/**
+ * Concentric 16px container right above the submit button. Turnstile when the site key is set,
+ * otherwise (or if Cloudflare can't load) a quick sum to type. `resetKey` re-arms it after a
+ * failed attempt.
+ */
+function SecurityCheck({ onChange, resetKey }: { onChange: (state: CaptchaState) => void; resetKey: number }) {
+  const { language } = useI18n();
+  const ar = language === "ar";
+  const host = useRef<HTMLDivElement>(null);
+  const widget = useRef<string | null>(null);
+  const [mode, setMode] = useState<"turnstile" | "local">(CAPTCHA_SITE_KEY ? "turnstile" : "local");
+  const [pair, setPair] = useState(() => [2 + Math.floor(Math.random() * 8), 1 + Math.floor(Math.random() * 9)] as const);
+  const [answer, setAnswer] = useState("");
+  const solved = mode === "local" && Number(answer) === pair[0] + pair[1];
+  // A fresh check (new tab / remount) never inherits an old token.
+  useEffect(() => onChange(null), [onChange]);
+
+  // Turnstile widget
+  useEffect(() => {
+    if (mode !== "turnstile" || !host.current) return;
+    let alive = true;
+    loadTurnstile()
+      .then((api) => {
+        if (!alive || !host.current) return;
+        widget.current = api.render(host.current, {
+          sitekey: CAPTCHA_SITE_KEY,
+          language: ar ? "ar" : "en",
+          theme: document.documentElement.classList.contains("dark") ? "dark" : "light",
+          callback: (token: string) => onChange({ kind: "turnstile", token }),
+          "expired-callback": () => onChange(null),
+          "error-callback": () => onChange(null),
+        });
+      })
+      .catch(() => {
+        if (alive) setMode("local"); // Cloudflare blocked / offline → built-in check
+      });
+    return () => {
+      alive = false;
+      if (widget.current) window.turnstile?.remove(widget.current);
+      widget.current = null;
+    };
+  }, [mode, ar, onChange]);
+
+  // Re-arm after a failed attempt
+  useEffect(() => {
+    if (resetKey === 0) return;
+    onChange(null);
+    if (mode === "turnstile" && widget.current) window.turnstile?.reset(widget.current);
+    else {
+      setPair([2 + Math.floor(Math.random() * 8), 1 + Math.floor(Math.random() * 9)]);
+      setAnswer("");
+    }
+  }, [resetKey, mode, onChange]);
+
+  useEffect(() => {
+    if (mode === "local") onChange(solved ? { kind: "local" } : null);
+  }, [mode, solved, onChange]);
+
+  return (
+    <div className={`security-check rounded-[16px] p-3 ${solved ? "is-solved" : ""}`}>
+      <p className="mb-2 flex items-center gap-1.5 text-xs font-bold text-slate-700 dark:text-slate-200">
+        <ShieldCheck className={`size-4 ${solved ? "text-emerald-600" : "text-[#0284c7]"}`} strokeWidth={1.9} />
+        {ar ? "تحقق أمني" : "Security check"}
+        {solved ? <span className="ms-auto text-emerald-600">{ar ? "تم التحقق" : "Verified"}</span> : null}
+      </p>
+      {mode === "turnstile" ? (
+        <div ref={host} className="min-h-[65px]" />
+      ) : (
+        <div className="flex items-center gap-2" dir="ltr">
+          <span className="security-sum price-num grid min-h-11 shrink-0 place-items-center rounded-[12px] px-3 text-base font-extrabold">
+            {pair[0]} + {pair[1]} =
+          </span>
+          <input
+            className="field min-w-0 flex-1 text-center"
+            inputMode="numeric"
+            maxLength={2}
+            value={answer}
+            onChange={(event) => setAnswer(event.target.value.replace(/\D/g, ""))}
+            aria-label={ar ? "ناتج الجمع" : "Sum result"}
+            placeholder="?"
+            autoComplete="off"
+          />
+          <button
+            type="button"
+            onClick={() => {
+              setPair([2 + Math.floor(Math.random() * 8), 1 + Math.floor(Math.random() * 9)]);
+              setAnswer("");
+            }}
+            aria-label={ar ? "سؤال آخر" : "New question"}
+            className="grid size-11 shrink-0 place-items-center rounded-[12px] text-muted hover:text-fg"
+          >
+            <RefreshCw className="size-4" />
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Checks the Turnstile token on our server (single use); the built-in check passes locally. */
+async function verifyCaptcha(state: CaptchaState): Promise<boolean> {
+  if (!state) return false;
+  if (state.kind === "local") return true;
+  try {
+    const response = await fetch("/api/captcha", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ token: state.token }) });
+    const body = (await response.json()) as { ok?: boolean };
+    return body.ok === true;
+  } catch {
+    return false;
+  }
+}
 
 /** Redirects signed-in users home: they never see the sign-in / sign-up form. */
 export function AuthPortal({ initialTab = "login" }: { initialTab?: Tab }) {
@@ -101,6 +254,10 @@ function AuthPortalForm({ initialTab = "login" }: { initialTab?: Tab }) {
   const setTermsOpen = useNovaUi((state) => state.setTermsOpen);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [captcha, setCaptchaState] = useState<CaptchaState>(null);
+  const setCaptcha = useCallback((next: CaptchaState) => setCaptchaState(next), []);
+  const [captchaReset, setCaptchaReset] = useState(0);
+  const captchaText = ar ? "أكمل التحقق الأمني أولاً." : "Complete the security check first.";
 
   const rules = [
     { ok: password.length >= 8, label: t.ruleLen },
@@ -117,13 +274,19 @@ function AuthPortalForm({ initialTab = "login" }: { initialTab?: Tab }) {
       setError(zodError(parsed.error));
       return;
     }
+    if (!captcha) return setError(captchaText);
     setBusy(true);
     setAuthLoading("login");
     setAuthDone(false);
     setAuthSummary(email.trim());
     let ok = false;
+    // v27: try / catch / finally — the loading screen ALWAYS closes, success or failure.
     try {
-      const result = await loginAccount(parsed.data);
+      if (!(await verifyCaptcha(captcha))) {
+        setError(ar ? "فشل التحقق الأمني، أعد المحاولة." : "Security check failed, please try again.");
+        return;
+      }
+      const result = await loginAccount(parsed.data, ar ? "ar" : "en");
       if (!result.ok) {
         setError(result.error);
         return;
@@ -132,6 +295,8 @@ function AuthPortalForm({ initialTab = "login" }: { initialTab?: Tab }) {
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : t.signIn);
     } finally {
+      // A token is single-use: re-arm the check after every attempt that did not sign in.
+      if (!ok) setCaptchaReset((value) => value + 1);
       setBusy(false);
       setAuthDone(true);
       await new Promise((resolve) => setTimeout(resolve, HUD_FINISH_MS));
@@ -180,12 +345,17 @@ function AuthPortalForm({ initialTab = "login" }: { initialTab?: Tab }) {
       setError(zodError(parsed.error));
       return;
     }
+    if (!captcha) return setError(captchaText);
     setBusy(true);
     setAuthLoading("register");
     setAuthDone(false);
     setAuthSummary(email.trim());
     let ok = false;
     try {
+      if (!(await verifyCaptcha(captcha))) {
+        setError(ar ? "فشل التحقق الأمني، أعد المحاولة." : "Security check failed, please try again.");
+        return;
+      }
       const created = await registerAccount(parsed.data);
       if (!created.ok) {
         setError(created.error);
@@ -195,6 +365,7 @@ function AuthPortalForm({ initialTab = "login" }: { initialTab?: Tab }) {
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : t.createAccount);
     } finally {
+      if (!ok) setCaptchaReset((value) => value + 1);
       setBusy(false);
       setAuthDone(true);
       await new Promise((resolve) => setTimeout(resolve, HUD_FINISH_MS));
@@ -406,8 +577,9 @@ function AuthPortalForm({ initialTab = "login" }: { initialTab?: Tab }) {
             </label>
           </>
         )}
+        <SecurityCheck key={tab} onChange={setCaptcha} resetKey={captchaReset} />
         {error ? <p className="text-sm text-rose-600 dark:text-rose-300">{error}</p> : null}
-        <button type="submit" disabled={busy || (register && !acceptTerms)} className="btn-glow keep-white min-h-12 w-full rounded-[16px] font-semibold text-white disabled:opacity-60">
+        <button type="submit" disabled={busy || !captcha || (register && !acceptTerms)} className="btn-glow keep-white min-h-12 w-full rounded-[16px] font-semibold text-white disabled:opacity-60">
           {busy ? t.wait : register ? t.create : t.enter}
         </button>
       </form>
@@ -465,8 +637,8 @@ export function useGoogleReturn() {
     setAuthSummary("Google");
     setAuthLoading("login");
     void completeGoogleSignIn().then(async (result) => {
-      if (cancel) return;
-      if (!result.ok) toast.error(result.error);
+      // v27: always close the loading screen — even if this page re-rendered meanwhile.
+      if (!result.ok && !cancel) toast.error(result.error);
       setAuthDone(true);
       await new Promise((resolve) => setTimeout(resolve, HUD_FINISH_MS));
       setAuthLoading(null);

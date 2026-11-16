@@ -45,62 +45,47 @@ function SmoothScroll() {
       autoRaf: true,
       prevent: (node: HTMLElement) => locked() || Boolean(node.closest?.("[data-lenis-prevent], [role='dialog']")),
     });
-    // v26: after the browser sleeps / restores from bfcache, wake Lenis and re-measure the page.
-    const wake = () => {
-      lenis.start();
-      lenis.resize();
-    };
-    window.addEventListener("zovacharge:resume", wake);
-    return () => {
-      window.removeEventListener("zovacharge:resume", wake);
-      lenis.destroy();
-    };
+    // Lenis only eases the mouse wheel / trackpad; taps, clicks and touch scrolling stay native.
+    return () => lenis.destroy();
   }, []);
   return null;
 }
 
 /**
- * v26 — self-heal when the browser comes back (reopened, unlocked, tab restored, bfcache):
- * clears stale page locks and stuck interaction states so the page is always clickable.
- * Open modals keep their scroll lock; a loading overlay older than 10 s is dismissed.
+ * v27 — the sign-in / sign-up loading screen can never trap anyone: once it shows 100% it closes
+ * within ~1.6 s, and it is dismissed if it has been up for 45 s. A store subscription only.
  */
-function ResumeGuard() {
+function AuthHudWatchdog() {
   useEffect(() => {
-    let authSince = 0;
-    const stopWatch = useNovaUi.subscribe((state, previous) => {
-      if (state.authLoading && !previous.authLoading) authSince = Date.now();
+    let doneTimer = 0;
+    let longTimer = 0;
+    const stop = useNovaUi.subscribe((state, previous) => {
+      if (state.authDone && !previous.authDone) {
+        window.clearTimeout(doneTimer);
+        doneTimer = window.setTimeout(() => {
+          const ui = useNovaUi.getState();
+          if (ui.authDone) {
+            ui.setAuthLoading(null);
+            ui.setAuthDone(false);
+          }
+        }, 1600);
+      }
+      if (state.authLoading && !previous.authLoading) {
+        window.clearTimeout(longTimer);
+        longTimer = window.setTimeout(() => {
+          const ui = useNovaUi.getState();
+          if (ui.authLoading) {
+            ui.setAuthLoading(null);
+            ui.setAuthDone(false);
+          }
+        }, 45_000);
+      }
+      if (!state.authLoading) window.clearTimeout(longTimer);
     });
-    const heal = (event?: Event) => {
-      if (document.visibilityState !== "visible") return;
-      const persisted = event?.type === "pageshow" && (event as PageTransitionEvent).persisted;
-      const root = document.documentElement;
-      const body = document.body;
-      root.style.pointerEvents = "";
-      body.style.pointerEvents = "";
-      body.removeAttribute("inert");
-      // Only release the scroll lock when no dialog / overlay is actually open.
-      const overlayOpen = document.querySelector("[aria-modal='true'], .fixed.inset-0[data-lenis-prevent]");
-      if (!overlayOpen) {
-        body.style.overflow = "";
-        root.style.overflow = "";
-      }
-      document.querySelectorAll<HTMLElement>(".svc-grid[data-focus]").forEach((grid) => delete grid.dataset.focus);
-      const ui = useNovaUi.getState();
-      if (ui.authLoading && (persisted || Date.now() - authSince > 10_000)) {
-        ui.setAuthLoading(null);
-        ui.setAuthDone(false);
-      }
-      window.dispatchEvent(new Event("zovacharge:resume"));
-    };
-    const onVisible = () => heal();
-    window.addEventListener("pageshow", heal);
-    window.addEventListener("focus", onVisible);
-    document.addEventListener("visibilitychange", onVisible);
     return () => {
-      stopWatch();
-      window.removeEventListener("pageshow", heal);
-      window.removeEventListener("focus", onVisible);
-      document.removeEventListener("visibilitychange", onVisible);
+      stop();
+      window.clearTimeout(doneTimer);
+      window.clearTimeout(longTimer);
     };
   }, []);
   return null;
@@ -467,7 +452,7 @@ export function AppShell({ children }: { children: ReactNode }) {
         <PearlBackdrop />
         <AnimationGate />
         <SmoothScroll />
-        <ResumeGuard />
+        <AuthHudWatchdog />
         <ServiceWorkerKeepAlive />
         {/* Column layout: content grows, footer is pinned to the bottom even on short pages */}
         <div className="relative flex min-h-screen flex-col justify-between">

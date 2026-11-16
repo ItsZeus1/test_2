@@ -19,7 +19,7 @@ import {
 import { currencyCode, dollarsToCents } from "@/lib/money";
 import type { BalanceRequest, PaymentAddresses, PaymentMethod } from "@/lib/store/types";
 import { PayEmblem, methodLabel } from "@/components/pay-emblem";
-import { useNovaUi } from "@/lib/ui-store";
+import { useCooldown, useNovaUi } from "@/lib/ui-store";
 
 // Quick amounts in major units; the wallet currency decides the scale.
 const PACKS: Record<"USD" | "SYP", number[]> = {
@@ -51,6 +51,8 @@ export function TopUpModal() {
   const { profile } = useProfileState();
   const [busy, setBusy] = useState(false);
   const hud = useActionHud();
+  // v27: 30 s between top-up requests (also checked in the API).
+  const topupCooldown = useCooldown("zovacharge_last_topup_request_at", 30_000);
   const [senderName, setSenderName] = useState("");
   const [transferNumber, setTransferNumber] = useState("");
   const [custom, setCustom] = useState("");
@@ -104,6 +106,7 @@ export function TopUpModal() {
       setError(method === "SHAMCASH" ? t.fillAllFields : `${t.senderPhone}: 09XXXXXXXX`);
       return;
     }
+    if (topupCooldown.left > 0) return;
     setBusy(true);
     setError(null);
     try {
@@ -123,6 +126,7 @@ export function TopUpModal() {
         return;
       }
       setMine((current) => [result.request, ...current]);
+      topupCooldown.start();
       setSenderName("");
       setSenderPhone("");
       setTransferNumber("");
@@ -328,13 +332,14 @@ export function TopUpModal() {
                                 tabIndex={open ? 0 : -1}
                                 disabled={
                                   busy ||
+                                  topupCooldown.left > 0 ||
                                   transferNumber.trim().length < 3 ||
                                   (sham ? senderName.trim().length < 2 : senderPhone.length !== 10)
                                 }
                                 onClick={() => void sendRequest()}
                                 className="btn-glow keep-white mt-3 min-h-11 w-full rounded-full text-sm font-semibold text-white disabled:opacity-60"
                               >
-                                {busy ? t.wait : t.submitRequest}
+                                {busy ? t.wait : topupCooldown.left > 0 ? (language === "ar" ? `⏳ يرجى الانتظار ${topupCooldown.left} ثانية قبل إرسال طلب شحن جديد` : `⏳ Please wait ${topupCooldown.left} seconds before submitting another top-up request`) : t.submitRequest}
                               </button>
                             </div>
                           </div>

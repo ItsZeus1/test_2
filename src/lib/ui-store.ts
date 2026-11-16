@@ -1,5 +1,6 @@
 "use client";
 
+import { useCallback, useEffect, useState } from "react";
 import { create } from "zustand";
 
 import type { Currency } from "@/lib/store/types";
@@ -161,4 +162,41 @@ export function subscribeScroll(listener: ScrollListener): () => void {
 
 
 /** Visible build tag (side-menu footer + admin header). Bump on every release. */
-export const APP_VERSION = "v26.0";
+export const APP_VERSION = "v27.0";
+
+/**
+ * v27 anti-spam cooldown kept in localStorage (a refresh cannot skip it).
+ * Returns the whole seconds left (0 = ready) and `start()` to begin a new cooldown.
+ */
+export function useCooldown(storageKey: string, durationMs: number) {
+  const read = useCallback(() => {
+    try {
+      const at = Number(window.localStorage.getItem(storageKey) ?? 0);
+      return Math.max(0, Math.ceil((at + durationMs - Date.now()) / 1000));
+    } catch {
+      return 0;
+    }
+  }, [storageKey, durationMs]);
+  const [left, setLeft] = useState(0);
+  useEffect(() => {
+    setLeft(read());
+  }, [read]);
+  useEffect(() => {
+    if (left <= 0) return;
+    const timer = window.setInterval(() => {
+      const next = read();
+      setLeft(next);
+      if (next <= 0) window.clearInterval(timer);
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [left > 0, read]); // eslint-disable-line react-hooks/exhaustive-deps
+  const start = useCallback(() => {
+    try {
+      window.localStorage.setItem(storageKey, String(Date.now()));
+    } catch {
+      /* storage blocked: the in-memory countdown still runs */
+    }
+    setLeft(Math.ceil(durationMs / 1000));
+  }, [storageKey, durationMs]);
+  return { left, start };
+}

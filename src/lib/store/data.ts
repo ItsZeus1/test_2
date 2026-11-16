@@ -94,6 +94,12 @@ export type StoredUser = {
   savedPlayerIds?: Record<string, string>;
   /** Epoch ms of the last charge attempt (15 s anti-spam cooldown). */
   lastChargeAt?: number;
+  /** v27 sign-in security: wrong passwords in a row (3 → locked) and successful sign-ins per day. */
+  failedLoginAttempts?: number;
+  isLocked?: boolean;
+  dailyLoginCount?: number;
+  /** YYYY-MM-DD (Damascus time) of the last successful sign-in. */
+  lastLoginDate?: string;
 };
 
 export type StoredSession = {

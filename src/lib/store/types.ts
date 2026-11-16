@@ -216,6 +216,11 @@ export type AdminUser = {
   lastIp: string | null;
   lastSeenAt: string;
   isBlocked: boolean;
+  /** v27 sign-in security (admin view). */
+  isLocked?: boolean;
+  failedLoginAttempts?: number;
+  dailyLoginCount?: number;
+  lastLoginDate?: string;
 };
 
 export type AdminStats = {

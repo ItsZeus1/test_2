@@ -74,17 +74,10 @@ export function Storefront({ category = "all" }: { category?: Filter }) {
   // Category switches in place: the URL is updated with history.pushState (Next keeps the
   // page mounted), so the navbar, hero, ticker and pill animations never restart.
   const [filter, setFilter] = useState<Filter>(category);
-  const [gridLoading, setGridLoading] = useState(false);
   const [skipIntro] = useState(() => intro.played);
-  const gridTimer = useRef(0);
   const switchCategory = useCallback((next: Filter, push: boolean) => {
-    setFilter((current) => {
-      if (current === next) return current;
-      window.clearTimeout(gridTimer.current);
-      setGridLoading(true);
-      gridTimer.current = window.setTimeout(() => setGridLoading(false), 750);
-      return next;
-    });
+    // v27: category tabs switch instantly — the grid re-filters in place with no artificial wait.
+    setFilter(next);
     if (push) window.history.pushState(null, "", next === "all" ? "/" : `/category/${next}`);
   }, []);
   useEffect(() => {
@@ -96,7 +89,6 @@ export function Storefront({ category = "all" }: { category?: Filter }) {
     window.addEventListener("popstate", onPop);
     return () => {
       window.removeEventListener("popstate", onPop);
-      window.clearTimeout(gridTimer.current);
     };
   }, [switchCategory]);
   const [query, setQuery] = useState("");
@@ -297,7 +289,7 @@ export function Storefront({ category = "all" }: { category?: Filter }) {
 
       {error ? <p className="mt-6 text-sm text-[#1e3a8a]">{error}</p> : null}
 
-      {loading || gridLoading ? (
+      {loading ? (
         <div className="grid-skeleton mt-6 grid grid-cols-3 gap-2 sm:grid-cols-3 sm:gap-5 lg:grid-cols-4" aria-busy="true">
           {Array.from({ length: 6 }).map((_, index) => (
             <div key={index} className="sk h-36 rounded-2xl sm:h-52 sm:rounded-3xl" />
@@ -359,25 +351,14 @@ const ServiceCard = memo(function ServiceCard({
     const grid = event.currentTarget.closest<HTMLElement>(".svc-grid");
     if (grid) grid.dataset.focus = "1";
     setLaunching(true);
+    // v27: navigate at once (no artificial wait); the focus-pop plays while the page changes and
+    // clears itself 250 ms later so a card can never stay "launching".
+    router.push(`/service/${service.slug}`);
     window.setTimeout(() => {
-      router.push(`/service/${service.slug}`);
-      // v26 failsafe: the focus-pop clears itself 250 ms after navigating, so it can never stick.
-      window.setTimeout(() => {
-        setLaunching(false);
-        if (grid) delete grid.dataset.focus;
-      }, 250);
-    }, 200);
+      setLaunching(false);
+      if (grid) delete grid.dataset.focus;
+    }, 250);
   };
-  // Back/forward cache or a woken-up tab must never come back with a "launching" card.
-  useEffect(() => {
-    const reset = () => setLaunching(false);
-    window.addEventListener("zovacharge:resume", reset);
-    window.addEventListener("pageshow", reset);
-    return () => {
-      window.removeEventListener("zovacharge:resume", reset);
-      window.removeEventListener("pageshow", reset);
-    };
-  }, []);
   const profile = vipMargin > 0 ? { role: "VIP" as const, vipProfitMargin: vipMargin } : null;
   return (
     <article

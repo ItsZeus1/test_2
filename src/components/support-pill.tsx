@@ -7,6 +7,7 @@ import { toast } from "sonner";
 
 import { useProfileState } from "@/components/profile";
 import { useI18n } from "@/lib/i18n";
+import { useCooldown } from "@/lib/ui-store";
 import { Link } from "@/lib/nav";
 import { closeMyTicket, endGuestTicket, getGuestTicket, listMySupportTickets, loadSupportImage, markSupportRead, onStoreChange, sendGuestSupportMessage, sendSupportMessage, uploadSupportImage } from "@/lib/store/api";
 import type { SupportMessage, SupportTicket } from "@/lib/store/types";
@@ -375,6 +376,8 @@ function SupportCenter({ onClose }: { onClose: () => void }) {
   const [guestTicket, setGuestTicket] = useGuestTicket(ready && !profile);
   const [pendingPhoto, setPendingPhoto] = useState<string | null>(null);
   const [lightbox, setLightbox] = useState<string | null>(null);
+  // v27: 15 s between messages (users and guests; the admin inbox has no limit).
+  const cooldown = useCooldown("zovacharge_last_support_message_at", 15_000);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [newSubject, setNewSubject] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
@@ -438,7 +441,7 @@ function SupportCenter({ onClose }: { onClose: () => void }) {
 
   async function send() {
     const text = draft.trim();
-    if ((!text && !pendingPhoto) || busy) return;
+    if ((!text && !pendingPhoto) || busy || cooldown.left > 0) return;
     setBusy(true);
     try {
       // The photo goes to private server storage first; the message only carries its id.
@@ -461,6 +464,7 @@ function SupportCenter({ onClose }: { onClose: () => void }) {
         setDraft("");
         setPendingPhoto(null);
         setGuestTicket(result.ticket);
+        cooldown.start();
         return;
       }
       const result = await sendSupportMessage({
@@ -476,6 +480,7 @@ function SupportCenter({ onClose }: { onClose: () => void }) {
       }
       setDraft("");
       setPendingPhoto(null);
+      cooldown.start();
       setNewSubject(null);
       setSelectedId(result.ticket.id);
     } finally {
@@ -494,8 +499,14 @@ function SupportCenter({ onClose }: { onClose: () => void }) {
   const composer = (
     <div className="border-t border-white/10 px-3 pt-3 pb-[max(env(safe-area-inset-bottom),0.75rem)] sm:px-4">
       {pendingPhoto ? <PendingPhoto src={pendingPhoto} onRemove={() => setPendingPhoto(null)} /> : null}
+      {cooldown.left > 0 ? (
+        <p className="cooldown-line mb-2 flex items-center gap-1.5 rounded-[12px] px-3 py-1.5 text-xs font-bold" role="status">
+          <span className="price-num">{cooldown.left}s</span>
+          {language === "ar" ? `⏳ انتظر ${cooldown.left} ثانية لإرسال رسالة جديدة...` : `⏳ Wait ${cooldown.left}s before sending another message...`}
+        </p>
+      ) : null}
       <div className="flex items-end gap-2">
-        <AttachPhotoButton onPicked={setPendingPhoto} disabled={busy} />
+        <AttachPhotoButton onPicked={setPendingPhoto} disabled={busy || cooldown.left > 0} />
         <textarea
           value={draft}
           onChange={(event) => setDraft(event.target.value)}
@@ -509,11 +520,11 @@ function SupportCenter({ onClose }: { onClose: () => void }) {
         <button
           type="button"
           onClick={() => void send()}
-          disabled={busy || (!draft.trim() && !pendingPhoto)}
+          disabled={busy || cooldown.left > 0 || (!draft.trim() && !pendingPhoto)}
           aria-label={t.send}
           className="btn-glow keep-white grid size-11 shrink-0 place-items-center rounded-2xl text-white disabled:opacity-50"
         >
-          <Send className="size-4 rtl:-scale-x-100" />
+          {cooldown.left > 0 ? <span className="price-num text-xs font-extrabold">{cooldown.left}</span> : <Send className="size-4 rtl:-scale-x-100" />}
         </button>
       </div>
     </div>

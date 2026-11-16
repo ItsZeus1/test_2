@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link } from "@/lib/nav";
-import { Boxes, LayoutDashboard, MessagesSquare, Pencil, Plus, ShieldCheck, SlidersHorizontal, Trash2, Users } from "lucide-react";
+import { Boxes, LayoutDashboard, Lock, LockOpen, MessagesSquare, Pencil, Plus, ShieldCheck, SlidersHorizontal, Trash2, Users } from "lucide-react";
 import { toast } from "sonner";
 
 import { HeroPhotoManager } from "@/components/hero-manager";
@@ -39,6 +39,7 @@ import {
   setOffersTicker,
   toggleBlockUser,
   migratePackageSecrets,
+  adminUnlockUser,
 } from "@/lib/store/api";
 import { DEFAULT_SYP_RATE } from "@/lib/money";
 import type { StoredBalanceRequest } from "@/lib/store/data";
@@ -203,6 +204,12 @@ export function AdminDashboard() {
     const result = await toggleBlockUser({ userId: user.userId });
     if (!result.ok) toast.error(result.error);
     else toast.success(result.isBlocked ? t.userBlocked : t.userUnblocked);
+  }
+
+  async function unlock(user: AdminUser) {
+    const result = await adminUnlockUser(user.userId);
+    if (!result.ok) toast.error(result.error);
+    else toast.success(language === "ar" ? `تم فك قفل حساب ${user.name} وتصفير المحاولات` : `${user.name} unlocked, limits reset`);
   }
 
   async function changeRole(userId: string, role: Role) {
@@ -449,11 +456,36 @@ export function AdminDashboard() {
                   {t.fullProfile}
                 </button>
                 {user.isBlocked ? (
-                  <span className="rounded-full border border-rose-300/40 px-2 py-1 text-[10px] font-bold tracking-wide text-rose-100 uppercase">
+                  <span className="rounded-full border border-rose-300/40 px-2 py-1 text-[10px] font-bold tracking-wide text-rose-700 uppercase dark:text-rose-200">
                     {t.blocked}
                   </span>
                 ) : null}
+                {user.isLocked ? (
+                  <span className="inline-flex items-center gap-1 rounded-full bg-rose-600 px-2.5 py-1 text-[11px] font-extrabold text-white shadow-sm">
+                    <Lock className="size-3.5" strokeWidth={2.25} />
+                    {language === "ar" ? "الحساب مقفل" : "Account locked"}
+                  </span>
+                ) : (user.failedLoginAttempts ?? 0) > 0 ? (
+                  <span className="rounded-full border border-amber-400/50 px-2 py-1 text-[10px] font-bold text-amber-700 dark:text-amber-300">
+                    {language === "ar" ? `محاولات خاطئة: ${user.failedLoginAttempts}/3` : `Wrong passwords: ${user.failedLoginAttempts}/3`}
+                  </span>
+                ) : null}
+                {(user.dailyLoginCount ?? 0) >= 3 ? (
+                  <span className="rounded-full border border-amber-400/50 px-2 py-1 text-[10px] font-bold text-amber-700 dark:text-amber-300">
+                    {language === "ar" ? "وصل لحد الدخول اليومي" : "Daily sign-in limit reached"}
+                  </span>
+                ) : null}
               </div>
+              {user.isLocked || (user.dailyLoginCount ?? 0) >= 3 || (user.failedLoginAttempts ?? 0) > 0 ? (
+                <button
+                  type="button"
+                  onClick={() => void unlock(user)}
+                  className="mt-2 inline-flex min-h-10 items-center gap-1.5 rounded-full bg-rose-600 px-3.5 text-xs font-extrabold text-white shadow-sm hover:bg-rose-700"
+                >
+                  <LockOpen className="size-4" strokeWidth={2} />
+                  {language === "ar" ? "فك القفل وتصفير المحاولات" : "Unlock Account & Reset Limits"}
+                </button>
+              ) : null}
               <p className="mt-1 text-sm text-muted">
                 {user.email} · {money(user.balanceCents, user.currency)} ({user.currency}) · {user.lastIp || t.ipMissing}
               </p>
