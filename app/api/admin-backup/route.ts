@@ -30,10 +30,10 @@ export async function GET(request: Request) {
   }
 
   // Vault stock (codes / accounts) — operational data the owner needs to restore the shop.
-  let vault = await supabase.from("vault_items").select(VAULT_COLUMNS).order("created_at", { ascending: true }).limit(20_000);
-  if (vault.error && vaultNeedsUpgrade(vault.error)) {
-    vault = await supabase.from("vault_items").select(VAULT_LEGACY_COLUMNS).order("created_at", { ascending: true }).limit(20_000);
-  }
+  // `columns: string` keeps one result type for both column lists (before / after SQL part 8).
+  const readVault = (columns: string) => supabase.from("vault_items").select(columns).order("created_at", { ascending: true }).limit(20_000);
+  let vault = await readVault(VAULT_COLUMNS);
+  if (vault.error && vaultNeedsUpgrade(vault.error)) vault = await readVault(VAULT_LEGACY_COLUMNS);
 
   const users = state.users.map((user) => {
     // Explicit allow-list: no passwordHash / passwordSalt / sessions / tokens.
