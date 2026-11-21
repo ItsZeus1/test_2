@@ -1,0 +1,1125 @@
+"use client";
+
+import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
+import { useRouter } from "next/navigation";
+import { ArrowLeft, Banknote, Check, Eye, EyeOff, KeyRound, Mail, MessageCircle, RefreshCw, ShieldCheck } from "lucide-react";
+
+import { ActionLoadingOverlay, HUD_FINISH_MS } from "@/components/action-loading-overlay";
+import { SyriaGreenFlagIcon } from "@/components/pay-emblem";
+import { useProfileState } from "@/components/profile";
+import { useNovaUi } from "@/lib/ui-store";
+import { useNavigate } from "@/lib/nav";
+import { toast } from "sonner";
+
+import { useI18n } from "@/lib/i18n";
+import type { Currency } from "@/lib/store/types";
+import { completeGoogleSignIn, completeProfile, loginAccount, openGuestRecoveryTicket, registerAccount, resendEmailCode, resumePendingSignUp, startEmailSignUp, startGoogleSignIn, verifyEmailCode } from "@/lib/store/api";
+import { MIN_AGE, SY_MOBILE, ageFromBirthDate, formatSyMobile, loginSchema, registerSchema, zodError } from "@/lib/validation";
+
+type Tab = "login" | "register";
+
+/* ============================ v27: security check (CAPTCHA) ============================ */
+
+/**
+ * Cloudflare Turnstile site key (the same key Supabase's CAPTCHA settings use). Until it is set
+ * in Vercel, a built-in challenge is shown instead, so the field works from day one.
+ */
+const CAPTCHA_SITE_KEY = (process.env.NEXT_PUBLIC_SUPABASE_CAPTCHA_SITE_KEY ?? process.env.NEXT_PUBLIC_TURNSTILE_SITE_KEY ?? "").trim();
+const TURNSTILE_SRC = "https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit";
+
+type TurnstileApi = {
+  render: (element: HTMLElement, options: Record<string, unknown>) => string;
+  reset: (widgetId?: string) => void;
+  remove: (widgetId: string) => void;
+};
+declare global {
+  interface Window {
+    turnstile?: TurnstileApi;
+  }
+}
+
+let turnstileLoader: Promise<TurnstileApi> | null = null;
+function loadTurnstile(): Promise<TurnstileApi> {
+  if (window.turnstile) return Promise.resolve(window.turnstile);
+  turnstileLoader ??= new Promise<TurnstileApi>((resolve, reject) => {
+    const script = document.createElement("script");
+    script.src = TURNSTILE_SRC;
+    script.async = true;
+    script.defer = true;
+    script.onload = () => (window.turnstile ? resolve(window.turnstile) : reject(new Error("Turnstile unavailable")));
+    script.onerror = () => {
+      turnstileLoader = null;
+      reject(new Error("Turnstile unavailable"));
+    };
+    document.head.appendChild(script);
+  });
+  return turnstileLoader;
+}
+
+/** What the form needs to know: a Turnstile token, or that the built-in check is solved. */
+export type CaptchaState = { kind: "turnstile"; token: string } | { kind: "local" } | null;
+
+/**
+ * Concentric 16px container right above the submit button. Turnstile when the site key is set,
+ * otherwise (or if Cloudflare can't load) a quick sum to type. `resetKey` re-arms it after a
+ * failed attempt.
+ */
+function SecurityCheck({ onChange, resetKey }: { onChange: (state: CaptchaState) => void; resetKey: number }) {
+  const { language } = useI18n();
+  const ar = language === "ar";
+  const host = useRef<HTMLDivElement>(null);
+  const widget = useRef<string | null>(null);
+  const [mode, setMode] = useState<"turnstile" | "local">(CAPTCHA_SITE_KEY ? "turnstile" : "local");
+  const [pair, setPair] = useState(() => [2 + Math.floor(Math.random() * 8), 1 + Math.floor(Math.random() * 9)] as const);
+  const [answer, setAnswer] = useState("");
+  const solved = mode === "local" && Number(answer) === pair[0] + pair[1];
+  // A fresh check (new tab / remount) never inherits an old token.
+  useEffect(() => onChange(null), [onChange]);
+
+  // Turnstile widget
+  useEffect(() => {
+    if (mode !== "turnstile" || !host.current) return;
+    let alive = true;
+    loadTurnstile()
+      .then((api) => {
+        if (!alive || !host.current) return;
+        widget.current = api.render(host.current, {
+          sitekey: CAPTCHA_SITE_KEY,
+          language: ar ? "ar" : "en",
+          theme: document.documentElement.classList.contains("dark") ? "dark" : "light",
+          callback: (token: string) => onChange({ kind: "turnstile", token }),
+          "expired-callback": () => onChange(null),
+          "error-callback": () => onChange(null),
+        });
+      })
+      .catch(() => {
+        if (alive) setMode("local"); // Cloudflare blocked / offline → built-in check
+      });
+    return () => {
+      alive = false;
+      if (widget.current) window.turnstile?.remove(widget.current);
+      widget.current = null;
+    };
+  }, [mode, ar, onChange]);
+
+  // Re-arm after a failed attempt
+  useEffect(() => {
+    if (resetKey === 0) return;
+    onChange(null);
+    if (mode === "turnstile" && widget.current) window.turnstile?.reset(widget.current);
+    else {
+      setPair([2 + Math.floor(Math.random() * 8), 1 + Math.floor(Math.random() * 9)]);
+      setAnswer("");
+    }
+  }, [resetKey, mode, onChange]);
+
+  useEffect(() => {
+    if (mode === "local") onChange(solved ? { kind: "local" } : null);
+  }, [mode, solved, onChange]);
+
+  return (
+    <div className={`security-check rounded-[16px] p-3 ${solved ? "is-solved" : ""}`}>
+      <p className="mb-2 flex items-center gap-1.5 text-xs font-bold text-slate-700 dark:text-slate-200">
+        <ShieldCheck className={`size-4 ${solved ? "text-emerald-600" : "text-[#0284c7]"}`} strokeWidth={1.9} />
+        {ar ? "تحقق أمني" : "Security check"}
+        {solved ? <span className="ms-auto text-emerald-600">{ar ? "تم التحقق" : "Verified"}</span> : null}
+      </p>
+      {mode === "turnstile" ? (
+        <div ref={host} className="min-h-[65px]" />
+      ) : (
+        <div className="flex items-center gap-2" dir="ltr">
+          <span className="security-sum price-num grid min-h-11 shrink-0 place-items-center rounded-[12px] px-3 text-base font-extrabold">
+            {pair[0]} + {pair[1]} =
+          </span>
+          <input
+            className="field min-w-0 flex-1 text-center"
+            inputMode="numeric"
+            maxLength={2}
+            value={answer}
+            onChange={(event) => setAnswer(event.target.value.replace(/\D/g, ""))}
+            aria-label={ar ? "ناتج الجمع" : "Sum result"}
+            placeholder="?"
+            autoComplete="off"
+          />
+          <button
+            type="button"
+            onClick={() => {
+              setPair([2 + Math.floor(Math.random() * 8), 1 + Math.floor(Math.random() * 9)]);
+              setAnswer("");
+            }}
+            aria-label={ar ? "سؤال آخر" : "New question"}
+            className="grid size-11 shrink-0 place-items-center rounded-[12px] text-muted hover:text-fg"
+          >
+            <RefreshCw className="size-4" />
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Checks the Turnstile token on our server (single use); the built-in check passes locally. */
+async function verifyCaptcha(state: CaptchaState): Promise<boolean> {
+  if (!state) return false;
+  if (state.kind === "local") return true;
+  try {
+    const response = await fetch("/api/captcha", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ token: state.token }) });
+    const body = (await response.json()) as { ok?: boolean };
+    return body.ok === true;
+  } catch {
+    return false;
+  }
+}
+
+/** Redirects signed-in users home: they never see the sign-in / sign-up form. */
+export function AuthPortal({ initialTab = "login" }: { initialTab?: Tab }) {
+  const router = useRouter();
+  const { profile, ready } = useProfileState();
+  const authLoading = useNovaUi((state) => state.authLoading);
+  const authDone = useNovaUi((state) => state.authDone);
+  const authSummary = useNovaUi((state) => state.authSummary);
+  useEffect(() => {
+    if (ready && profile && !authLoading) router.replace("/");
+  }, [ready, profile, authLoading, router]);
+  if (!ready) return null;
+  return (
+    <>
+      {profile ? null : <AuthPortalForm initialTab={initialTab} />}
+      <ActionLoadingOverlay action={authLoading} done={authDone} summary={authSummary} />
+    </>
+  );
+}
+
+/** Password input with an eye button; the button sits on the right in LTR and the left in RTL. */
+function PasswordField({
+  value,
+  onChange,
+  autoComplete,
+}: {
+  value: string;
+  onChange: (value: string) => void;
+  autoComplete: string;
+}) {
+  const { isAr, language } = useI18n();
+  const [visible, setVisible] = useState(false);
+  const label = visible ? (language === "ar" ? "إخفاء كلمة المرور" : "Hide password") : language === "ar" ? "إظهار كلمة المرور" : "Show password";
+  return (
+    <span className="relative mt-1 block">
+      <input
+        className="field"
+        style={isAr ? { paddingLeft: "3rem" } : { paddingRight: "3rem" }}
+        dir="ltr"
+        type={visible ? "text" : "password"}
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        autoComplete={autoComplete}
+        autoCapitalize="off"
+        spellCheck={false}
+      />
+      <button
+        type="button"
+        onClick={() => setVisible((current) => !current)}
+        aria-label={label}
+        aria-pressed={visible}
+        title={label}
+        className={`absolute top-1/2 grid size-10 -translate-y-1/2 place-items-center rounded-xl text-muted hover:bg-white/5 hover:text-fg ${isAr ? "left-1" : "right-1"}`}
+      >
+        {visible ? <EyeOff className="size-[18px]" /> : <Eye className="size-[18px]" />}
+      </button>
+    </span>
+  );
+}
+
+function AuthPortalForm({ initialTab = "login" }: { initialTab?: Tab }) {
+  const navigate = useNavigate();
+  const setAuthLoading = useNovaUi((state) => state.setAuthLoading);
+  const setAuthDone = useNovaUi((state) => state.setAuthDone);
+  const setAuthSummary = useNovaUi((state) => state.setAuthSummary);
+  const setSupportOpen = useNovaUi((state) => state.setSupportOpen);
+  const { t, language } = useI18n();
+  const ar = language === "ar";
+  const [tab, setTab] = useState<Tab>(initialTab);
+  const [recovery, setRecovery] = useState(false);
+  const [recoveryEmail, setRecoveryEmail] = useState("");
+  const [recoveryPhone, setRecoveryPhone] = useState("");
+  const [recoveryBusy, setRecoveryBusy] = useState(false);
+  const [name, setName] = useState("");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [currency, setCurrency] = useState<Currency | "">("");
+  const [phone, setPhone] = useState("");
+  const [birthDate, setBirthDate] = useState("");
+  const [acceptTerms, setAcceptTerms] = useState(false);
+  const setTermsOpen = useNovaUi((state) => state.setTermsOpen);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [captcha, setCaptchaState] = useState<CaptchaState>(null);
+  const setCaptcha = useCallback((next: CaptchaState) => setCaptchaState(next), []);
+  const [captchaReset, setCaptchaReset] = useState(0);
+  const captchaText = ar ? "أكمل التحقق الأمني أولاً." : "Complete the security check first.";
+  // v34: 6-digit email step. `form` = the sign-up just submitted; without it (coming back from
+  // the sign-in form) the details saved with the sign-up are used.
+  const [verify, setVerify] = useState<{ email: string; password: string; note?: string; form?: Record<string, unknown> } | null>(null);
+
+  const rules = [
+    { ok: password.length >= 8, label: t.ruleLen },
+    { ok: /[A-Z]/.test(password), label: t.ruleUpper },
+    { ok: /[a-z]/.test(password), label: t.ruleLower },
+    { ok: /[0-9]/.test(password), label: t.ruleNum },
+  ];
+
+  async function onLogin(event: FormEvent) {
+    event.preventDefault();
+    setError(null);
+    const parsed = loginSchema.safeParse({ email, password });
+    if (!parsed.success) {
+      setError(zodError(parsed.error));
+      return;
+    }
+    if (!captcha) return setError(captchaText);
+    setBusy(true);
+    setAuthLoading("login");
+    setAuthDone(false);
+    setAuthSummary(email.trim());
+    let ok = false;
+    let toVerify = false;
+    try {
+      if (!(await verifyCaptcha(captcha))) {
+        setError(ar ? "فشل التحقق الأمني، أعد المحاولة." : "Security check failed, please try again.");
+        return;
+      }
+      const result = await loginAccount(parsed.data, ar ? "ar" : "en");
+      if (!result.ok) {
+        // v34: signed up earlier but never typed the code → send a fresh one and open the code step.
+        if (await resumePendingSignUp(parsed.data.email, parsed.data.password)) {
+          toVerify = true;
+          setVerify({ email: parsed.data.email.trim().toLowerCase(), password: parsed.data.password, note: t.verifyPending });
+          return;
+        }
+        setError(result.error);
+        return;
+      }
+      ok = true;
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : t.signIn);
+    } finally {
+      // A token is single-use: re-arm the check after every attempt that did not sign in.
+      if (!ok) setCaptchaReset((value) => value + 1);
+      setBusy(false);
+      if (toVerify) {
+        // Straight to the code step — no finishing animation, no 92 % wait.
+        setAuthLoading(null);
+        setAuthDone(false);
+      } else {
+        setAuthDone(true);
+        await new Promise((resolve) => setTimeout(resolve, HUD_FINISH_MS));
+        setAuthLoading(null);
+        setAuthDone(false);
+      }
+    }
+    if (ok) await navigate({ to: "/" });
+  }
+
+  async function onRegister(event: FormEvent) {
+    event.preventDefault();
+    setError(null);
+    if (name.trim().length < 2) {
+      setError(ar ? "أدخل الاسم الكامل (حرفان على الأقل)." : "Enter your full name (at least 2 characters).");
+      return;
+    }
+    if (!SY_MOBILE.test(phone)) {
+      setError(t.mobileInvalid);
+      return;
+    }
+    if (!birthDate) {
+      setError(t.dobRequired);
+      return;
+    }
+    const age = ageFromBirthDate(birthDate);
+    if (age === null || age < MIN_AGE) {
+      setError(t.under18);
+      return;
+    }
+    if (!acceptTerms) {
+      setError(t.termsRequired);
+      return;
+    }
+    // v25: no username — the API derives one silently from the email prefix.
+    const parsed = registerSchema.safeParse({
+      name,
+      email,
+      password,
+      confirmPassword,
+      currency: currency || undefined,
+      phone,
+      birthDate,
+      acceptTerms,
+    });
+    if (!parsed.success) {
+      setError(zodError(parsed.error));
+      return;
+    }
+    if (!captcha) return setError(captchaText);
+    setBusy(true);
+    setAuthLoading("register");
+    setAuthDone(false);
+    setAuthSummary(email.trim());
+    let ok = false;
+    let toVerify = false;
+    try {
+      if (!(await verifyCaptcha(captcha))) {
+        setError(ar ? "فشل التحقق الأمني، أعد المحاولة." : "Security check failed, please try again.");
+        return;
+      }
+      // v34/v35: email + password sign-up ALWAYS goes through the 6-digit code (Google never comes here).
+      const started = await startEmailSignUp(
+        {
+          email: parsed.data.email,
+          password: parsed.data.password,
+          name: parsed.data.name,
+          phone: parsed.data.phone,
+          birthDate: parsed.data.birthDate,
+          currency: parsed.data.currency,
+        },
+        ar ? "ar" : "en",
+      );
+      if (!started.ok) {
+        setError(started.error);
+        return;
+      }
+      if (started.status === "verify") {
+        toVerify = true;
+        setVerify({ email: parsed.data.email.trim().toLowerCase(), password: parsed.data.password, form: { ...parsed.data } });
+        return;
+      }
+      // Only when Supabase isn't configured at all (local preview): create the account straight away.
+      const created = await registerAccount(parsed.data);
+      if (!created.ok) {
+        setError(created.error);
+        return;
+      }
+      ok = true;
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : t.createAccount);
+    } finally {
+      if (!ok) setCaptchaReset((value) => value + 1);
+      setBusy(false);
+      if (toVerify) {
+        setAuthLoading(null);
+        setAuthDone(false);
+      } else {
+        setAuthDone(true);
+        await new Promise((resolve) => setTimeout(resolve, HUD_FINISH_MS));
+        setAuthLoading(null);
+        setAuthDone(false);
+      }
+    }
+    if (ok) await navigate({ to: "/" });
+  }
+
+  /** v34: the code is right → create the ZovaCharge account (marked verified). Returns an error or null. */
+  async function finishVerification(code: string): Promise<string | null> {
+    if (!verify) return t.verifyWrong;
+    const checked = await verifyEmailCode(verify.email, code, ar ? "ar" : "en");
+    if (!checked.ok) return checked.error;
+    const saved = checked.pending;
+    const data = verify.form ?? {
+      name: saved.name || verify.email.split("@")[0],
+      email: verify.email,
+      password: verify.password,
+      confirmPassword: verify.password,
+      currency: saved.currency || undefined,
+      phone: saved.phone,
+      birthDate: saved.birthDate,
+      acceptTerms: true,
+    };
+    const created = await registerAccount(data, { emailVerified: true });
+    return created.ok ? null : created.error;
+  }
+
+  /** v25: no email codes — open a guest live-support chat flagged as urgent password recovery. */
+  async function onRecovery(event: FormEvent) {
+    event.preventDefault();
+    setError(null);
+    if (!SY_MOBILE.test(recoveryPhone)) return setError(t.mobileInvalid);
+    setRecoveryBusy(true);
+    try {
+      const result = await openGuestRecoveryTicket({ email: recoveryEmail.trim(), phone: recoveryPhone, language: ar ? "ar" : "en" });
+      if (!result.ok) return setError(result.error);
+      setRecovery(false);
+      setSupportOpen(true);
+      toast.success(ar ? `تم فتح محادثة استعادة الحساب #${result.ticket.ticketNumber}` : `Recovery chat #${result.ticket.ticketNumber} is open`);
+    } finally {
+      setRecoveryBusy(false);
+    }
+  }
+
+  if (recovery) {
+    return (
+      <div className="glass auth-card recovery-card mx-auto w-[95vw] rounded-[28px] p-5 sm:max-w-md">
+        <form onSubmit={(event) => void onRecovery(event)} className="space-y-4">
+          <div className="flex items-center gap-3">
+            <span className="recovery-emblem grid size-12 shrink-0 place-items-center rounded-[16px]">
+              <KeyRound className="size-6" strokeWidth={1.75} />
+            </span>
+            <div className="min-w-0">
+              <h2 className="font-display text-xl font-extrabold">{t.recoveryTitle}</h2>
+              <p className="mt-0.5 text-sm text-slate-600 dark:text-slate-300">
+                {ar ? "فريق الدعم يتحقق منك مباشرةً ويعيد ضبط كلمة المرور خلال دقائق." : "Our team verifies you in a live chat and resets your password within minutes."}
+              </p>
+            </div>
+          </div>
+          <label className="block text-sm text-muted">
+            {t.accountEmail} <span className="text-rose-500" aria-hidden>*</span>
+            <input className="field mt-1" dir="ltr" type="email" required autoComplete="email" value={recoveryEmail} onChange={(event) => setRecoveryEmail(event.target.value)} />
+          </label>
+          <label className="block text-sm text-muted">
+            {ar ? "رقم الموبايل المرتبط بالحساب" : "Mobile number linked to the account"} <span className="text-rose-500" aria-hidden>*</span>
+            <input
+              className="field mt-1"
+              dir="ltr"
+              type="tel"
+              required
+              inputMode="numeric"
+              placeholder="09XX-XXX-XXX"
+              maxLength={12}
+              value={recoveryPhone}
+              onChange={(event) => setRecoveryPhone(formatSyMobile(event.target.value))}
+              autoComplete="tel-national"
+            />
+          </label>
+          {error ? <p className="text-sm text-rose-600">{error}</p> : null}
+          <button type="submit" disabled={recoveryBusy} className="hub-cta keep-white flex min-h-12 w-full items-center justify-center gap-2 rounded-[16px] text-sm font-bold text-white disabled:opacity-60">
+            <MessageCircle className="size-4 shrink-0" strokeWidth={1.75} />
+            {recoveryBusy ? t.wait : ar ? "التحدث مع الدعم الفوري لاستعادة الحساب" : "Contact Live Support to Reset Password"}
+          </button>
+        </form>
+        <button
+          type="button"
+          onClick={() => {
+            setRecovery(false);
+            setError(null);
+          }}
+          className="mx-auto mt-3 flex min-h-10 items-center gap-1.5 text-sm font-semibold text-muted hover:text-fg"
+        >
+          <ArrowLeft className="size-4 rtl:rotate-180" />
+          {t.backToLogin}
+        </button>
+      </div>
+    );
+  }
+
+  // v35: the 6-digit step belongs to email + password sign-up only. A Google return
+  // (/login?oauth=google) is already verified by Google and never shows it.
+  const googleReturn = typeof window !== "undefined" && new URLSearchParams(window.location.search).get("oauth") === "google";
+  if (verify && !googleReturn) {
+    return (
+      <EmailCodeStep
+        email={verify.email}
+        note={verify.note}
+        onSubmit={finishVerification}
+        onResend={() => resendEmailCode(verify.email, ar ? "ar" : "en")}
+        onBack={() => {
+          setVerify(null);
+          setError(null);
+          setTab(verify.form ? "register" : "login");
+        }}
+        onDone={() => void navigate({ to: "/" })}
+      />
+    );
+  }
+
+  const register = tab === "register";
+  return (
+    <div className="glass auth-card recovery-card mx-auto w-[95vw] rounded-[28px] p-5 sm:max-w-md">
+      <div className="auth-tabs mb-4 grid grid-cols-2 rounded-[16px] p-1">
+        {(["login", "register"] as const).map((item) => (
+          <button
+            key={item}
+            type="button"
+            onClick={() => {
+              setTab(item);
+              setError(null);
+            }}
+            className={`min-h-11 rounded-[12px] text-sm font-semibold ${tab === item ? "btn-glow keep-white text-white" : "text-muted"}`}
+          >
+            {item === "login" ? t.login : t.createAccount}
+          </button>
+        ))}
+      </div>
+
+      <GoogleButton />
+      <div className="my-4 flex items-center gap-3 text-[11px] font-semibold text-muted" aria-hidden>
+        <span className="h-px flex-1 bg-current opacity-20" />
+        {ar ? "أو بالبريد الإلكتروني" : "or with email"}
+        <span className="h-px flex-1 bg-current opacity-20" />
+      </div>
+      <form className="space-y-3" onSubmit={register ? onRegister : onLogin}>
+        {register ? (
+          <label className="block text-sm text-muted">
+            {t.name} <span className="text-rose-500" aria-hidden>*</span>
+            <input className="field mt-1" required minLength={2} maxLength={60} value={name} onChange={(event) => setName(event.target.value)} autoComplete="name" aria-invalid={name.length > 0 && name.trim().length < 2} />
+          </label>
+        ) : null}
+        <label className="block text-sm text-muted">
+          {t.email}
+          <input className="field mt-1" dir="ltr" type="email" value={email} onChange={(event) => setEmail(event.target.value)} autoComplete="email" />
+        </label>
+        {register ? (
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <label className="block min-w-0 text-sm text-muted">
+              {t.mobileNumber} <span className="text-rose-500" aria-hidden>*</span>
+              <input
+                className="field mt-1"
+                dir="ltr"
+                type="tel"
+                inputMode="numeric"
+                required
+                placeholder="09XX-XXX-XXX"
+                maxLength={12}
+                value={phone}
+                onChange={(event) => setPhone(formatSyMobile(event.target.value))}
+                autoComplete="tel-national"
+                aria-invalid={phone.length > 0 && !SY_MOBILE.test(phone)}
+              />
+            </label>
+            <div className="block min-w-0 text-sm text-muted">
+              <span className="block">
+                {t.dob} <span className="text-rose-500" aria-hidden>*</span>
+              </span>
+              <span className="mt-1 block">
+                <BirthdateInput onChange={setBirthDate} />
+              </span>
+            </div>
+          </div>
+        ) : null}
+        <label className="block text-sm text-muted">
+          {t.password}
+          <PasswordField value={password} onChange={setPassword} autoComplete={register ? "new-password" : "current-password"} />
+        </label>
+        {!register ? (
+          <div className="-mt-1 flex justify-end">
+            <button
+              type="button"
+              onClick={() => {
+                setRecoveryEmail(email);
+                setRecovery(true);
+                setError(null);
+              }}
+              className="min-h-9 text-xs font-semibold text-sky-700 underline-offset-4 hover:underline dark:text-sky-300"
+            >
+              {t.forgotPassword}
+            </button>
+          </div>
+        ) : (
+          <>
+            <ul className="flex flex-wrap gap-1.5">
+              {rules.map((rule) => (
+                <li key={rule.label} className={`rounded-full px-2 py-0.5 text-[11px] ${rule.ok ? "bg-emerald-500/15 text-emerald-700 dark:text-emerald-300" : "bg-slate-500/10 text-muted"}`}>
+                  {rule.label}
+                </li>
+              ))}
+            </ul>
+            <label className="block text-sm text-muted">
+              {t.confirmPassword}
+              <PasswordField value={confirmPassword} onChange={setConfirmPassword} autoComplete="new-password" />
+            </label>
+            <fieldset className="text-sm text-muted">
+              <legend className="mb-1">
+                {t.currencyLabel} <span className="text-rose-500" aria-hidden>*</span>
+              </legend>
+              <div className="grid grid-cols-2 gap-2">
+                {([
+                  ["USD", t.currencyUsd],
+                  ["SYP", t.currencySyp],
+                ] as const).map(([id, label]) => (
+                  <label
+                    key={id}
+                    className={`flex min-h-12 cursor-pointer items-center gap-2 rounded-[16px] border px-3 py-2 text-start text-xs font-semibold leading-snug ${currency === id ? "border-[#0284c7] bg-[#0284c7]/10 text-fg" : "border-slate-300/70 bg-white/50 dark:border-white/10 dark:bg-white/5"}`}
+                  >
+                    <input type="radio" name="currency" value={id} required checked={currency === id} onChange={() => setCurrency(id)} className="size-4 shrink-0 accent-[#0284c7]" />
+                    {id === "SYP" ? <SyriaGreenFlagIcon /> : <Banknote className="size-4 shrink-0 text-emerald-600" strokeWidth={1.75} aria-hidden />}
+                    <span className="min-w-0">{label}</span>
+                  </label>
+                ))}
+              </div>
+            </fieldset>
+            <label className="flex cursor-pointer items-start gap-2.5 rounded-[16px] border border-slate-300/70 bg-white/50 p-3 text-sm dark:border-white/10 dark:bg-white/5">
+              <input type="checkbox" required checked={acceptTerms} onChange={(event) => setAcceptTerms(event.target.checked)} className="mt-0.5 size-5 shrink-0 accent-[#0284c7]" />
+              <span className="min-w-0">
+                {t.termsAgreeLead}{" "}
+                <button type="button" onClick={() => setTermsOpen(true)} className="font-semibold text-sky-700 underline underline-offset-4 dark:text-sky-300">
+                  {t.termsTitle}
+                </button>
+                <span className="text-rose-500" aria-hidden>
+                  {" "}
+                  *
+                </span>
+              </span>
+            </label>
+          </>
+        )}
+        <SecurityCheck key={tab} onChange={setCaptcha} resetKey={captchaReset} />
+        {error ? <p className="text-sm text-rose-600 dark:text-rose-300">{error}</p> : null}
+        <button type="submit" disabled={busy || !captcha || (register && !acceptTerms)} className="btn-glow keep-white min-h-12 w-full rounded-[16px] font-semibold text-white disabled:opacity-60">
+          {busy ? t.wait : register ? t.create : t.enter}
+        </button>
+      </form>
+    </div>
+  );
+}
+
+/* ============================ Google sign-in ============================ */
+
+/** Official multi-colour Google "G". */
+export function GoogleG({ className = "size-5" }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 48 48" className={className} aria-hidden>
+      <path fill="#FFC107" d="M43.6 20.5H42V20H24v8h11.3C33.7 32.7 29.2 36 24 36c-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34 6.1 29.3 4 24 4 12.9 4 4 12.9 4 24s8.9 20 20 20 20-8.9 20-20c0-1.3-.1-2.4-.4-3.5z" />
+      <path fill="#FF3D00" d="m6.3 14.7 6.6 4.8C14.7 15.1 19 12 24 12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34 6.1 29.3 4 24 4 16.3 4 9.7 8.3 6.3 14.7z" />
+      <path fill="#4CAF50" d="M24 44c5.2 0 9.9-2 13.4-5.2l-6.2-5.2C29.2 35.1 26.7 36 24 36c-5.2 0-9.6-3.3-11.3-8l-6.5 5C9.5 39.6 16.2 44 24 44z" />
+      <path fill="#1976D2" d="M43.6 20.5H42V20H24v8h11.3c-.8 2.2-2.2 4.2-4.1 5.6l6.2 5.2C37 39.2 44 34 44 24c0-1.3-.1-2.4-.4-3.5z" />
+    </svg>
+  );
+}
+
+export function GoogleButton() {
+  const { language } = useI18n();
+  const [busy, setBusy] = useState(false);
+  return (
+    <button
+      type="button"
+      disabled={busy}
+      onClick={() => {
+        setBusy(true);
+        void startGoogleSignIn().then((result) => {
+          // On success the browser leaves for Google; only failures come back here.
+          if (!result.ok) {
+            setBusy(false);
+            toast.error(result.error);
+          }
+        });
+      }}
+      className="google-btn flex min-h-12 w-full items-center justify-center gap-3 rounded-2xl px-4 text-sm font-bold disabled:opacity-60"
+    >
+      <GoogleG />
+      {language === "ar" ? "المتابعة السريعة عبر Google" : "Continue with Google"}
+    </button>
+  );
+}
+
+/** Runs on /login?oauth=google after Google redirects back. */
+export function useGoogleReturn() {
+  const setAuthLoading = useNovaUi((state) => state.setAuthLoading);
+  const setAuthDone = useNovaUi((state) => state.setAuthDone);
+  const setAuthSummary = useNovaUi((state) => state.setAuthSummary);
+  useEffect(() => {
+    if (typeof window === "undefined" || new URLSearchParams(window.location.search).get("oauth") !== "google") return;
+    let cancel = false;
+    setAuthSummary("Google");
+    setAuthLoading("login");
+    void completeGoogleSignIn().then(async (result) => {
+      if (cancel) return;
+      if (!result.ok) toast.error(result.error);
+      setAuthDone(true);
+      await new Promise((resolve) => setTimeout(resolve, HUD_FINISH_MS));
+      setAuthLoading(null);
+      setAuthDone(false);
+    });
+    return () => {
+      cancel = true;
+    };
+  }, [setAuthDone, setAuthLoading, setAuthSummary]);
+}
+
+/** Blocks the store until a Google account adds its Syrian mobile number, confirms 18+ and the terms. */
+export function CompleteProfileGate() {
+  const { language, t } = useI18n();
+  const ar = language === "ar";
+  const { profile, setProfile } = useProfileState();
+  const setTermsOpen = useNovaUi((state) => state.setTermsOpen);
+  const [fullName, setFullName] = useState<string | null>(null);
+  const [phone, setPhone] = useState("");
+  const [birthDate, setBirthDate] = useState("");
+  const [acceptTerms, setAcceptTerms] = useState(false);
+  const [currency, setCurrency] = useState<"USD" | "SYP">("USD");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  if (!profile?.needsCompletion || typeof document === "undefined") return null;
+
+  // Pre-filled from Google; the user can correct it. Both name and phone are required.
+  const nameValue = fullName ?? profile.name ?? "";
+
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    if (nameValue.trim().length < 2) return setError(ar ? "أدخل الاسم الكامل (حرفان على الأقل)." : "Enter your full name (at least 2 characters).");
+    const age = ageFromBirthDate(birthDate);
+    if (age === null || age < MIN_AGE) return setError(t.under18);
+    if (!SY_MOBILE.test(phone)) return setError(t.mobileInvalid);
+    if (!acceptTerms) return setError(t.termsRequired);
+    setBusy(true);
+    setError(null);
+    const result = await completeProfile({ name: nameValue.trim(), phone, birthDate, acceptTerms, currency });
+    setBusy(false);
+    if (!result.ok) return setError(result.error);
+    setProfile(result.profile);
+  }
+
+  return (
+    <div data-lenis-prevent className="fixed inset-0 z-[140] flex items-center justify-center overflow-y-auto bg-slate-950/60 p-4" role="presentation">
+      <form onSubmit={(event) => void submit(event)} role="dialog" aria-modal="true" aria-labelledby="complete-title" className="hud-card modal-pop my-auto w-full max-w-md space-y-3 rounded-3xl p-5 sm:p-6">
+        <div className="flex items-center gap-3">
+          <span className="grid size-11 place-items-center rounded-2xl bg-white shadow-sm ring-1 ring-black/5">
+            <GoogleG className="size-6" />
+          </span>
+          <div className="min-w-0">
+            <h2 id="complete-title" className="font-display text-lg font-extrabold">
+              {ar ? "إكمال بيانات الحساب السريع" : "Complete your profile"}
+            </h2>
+            <p className="truncate text-xs text-muted" dir="ltr">
+              {profile.email}
+            </p>
+          </div>
+        </div>
+        <label className="block text-sm text-muted">
+          {t.name} <span className="text-rose-500" aria-hidden>*</span>
+          <input className="field mt-1" required minLength={2} maxLength={60} autoComplete="name" value={nameValue} onChange={(event) => setFullName(event.target.value)} />
+        </label>
+        <label className="block text-sm text-muted">
+          {t.mobileNumber} <span className="text-rose-500" aria-hidden>*</span>
+          <input className="field mt-1" dir="ltr" type="tel" inputMode="numeric" required placeholder="09XX-XXX-XXX" maxLength={12} value={phone} onChange={(event) => setPhone(formatSyMobile(event.target.value))} />
+        </label>
+        <label className="block text-sm text-muted">
+          {t.dob}
+          <span className="mt-1 block">
+            <BirthdateInput onChange={setBirthDate} />
+          </span>
+        </label>
+        <div className="grid grid-cols-2 gap-2" role="group" aria-label={t.currencyLabel}>
+          {(["USD", "SYP"] as const).map((code) => (
+            <button
+              key={code}
+              type="button"
+              aria-pressed={currency === code}
+              onClick={() => setCurrency(code)}
+              className={`flex min-h-11 items-center justify-center gap-2 rounded-xl border text-xs font-bold ${currency === code ? "border-[#0284c7] bg-[#0284c7]/10 text-fg" : "border-white/10 bg-white/5 text-muted"}`}
+            >
+              {code === "SYP" ? <SyriaGreenFlagIcon /> : <Banknote className="size-4" strokeWidth={1.75} />}
+              {code === "SYP" ? t.currencySyp : t.currencyUsd}
+            </button>
+          ))}
+        </div>
+        <label className="flex cursor-pointer items-start gap-2.5 rounded-2xl border border-white/10 bg-white/5 p-3 text-sm">
+          <input type="checkbox" checked={acceptTerms} onChange={(event) => setAcceptTerms(event.target.checked)} className="mt-0.5 size-5 shrink-0 accent-[#0284c7]" />
+          <span>
+            {t.termsAgreeLead}{" "}
+            <button type="button" onClick={() => setTermsOpen(true)} className="font-semibold text-indigo-600 underline underline-offset-4">
+              {t.termsTitle}
+            </button>
+          </span>
+        </label>
+        {error ? <p className="text-sm text-rose-600">{error}</p> : null}
+        <button type="submit" disabled={busy} className="btn-glow keep-white min-h-12 w-full rounded-2xl text-sm font-bold text-white disabled:opacity-60">
+          {busy ? t.wait : ar ? "حفظ ومتابعة للمتجر" : "Save and enter the store"}
+        </button>
+      </form>
+    </div>
+  );
+}
+
+/* ============================ Smart birthdate (no native calendar) ============================ */
+
+/**
+ * Day / Month / Year boxes. Single digits are fine (1 / 11 / 2001); focus moves on automatically.
+ * Emits an ISO date (YYYY-MM-DD) once valid, or "" while incomplete / invalid.
+ */
+export function BirthdateInput({ onChange }: { onChange: (iso: string) => void }) {
+  const { language } = useI18n();
+  const ar = language === "ar";
+  const [day, setDay] = useState("");
+  const [month, setMonth] = useState("");
+  const [year, setYear] = useState("");
+  const monthRef = useRef<HTMLInputElement>(null);
+  const yearRef = useRef<HTMLInputElement>(null);
+  const maxYear = new Date().getFullYear();
+
+  useEffect(() => {
+    const d = Number(day);
+    const m = Number(month);
+    const y = Number(year);
+    const valid =
+      year.length === 4 &&
+      y >= 1930 &&
+      y <= maxYear &&
+      m >= 1 &&
+      m <= 12 &&
+      d >= 1 &&
+      d <= new Date(y, m, 0).getDate(); // real day count for that month (leap years included)
+    onChange(valid ? `${y}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}` : "");
+  }, [day, month, year, maxYear, onChange]);
+
+  const digitsOnly = (value: string, max: number) => value.replace(/\D/g, "").slice(0, max);
+  const box = "field price-num !min-h-12 min-w-0 text-center text-lg";
+  return (
+    <div className="birthdate-input grid grid-cols-[1fr_1fr_1.4fr] gap-2" dir="ltr" role="group" aria-label={ar ? "تاريخ الميلاد — يوم / شهر / سنة" : "Date of birth — day / month / year"}>
+      <input
+        className={box}
+        inputMode="numeric"
+        placeholder={ar ? "يوم" : "Day"}
+        aria-label={ar ? "اليوم" : "Day"}
+        value={day}
+        onChange={(event) => {
+          const next = digitsOnly(event.target.value, 2);
+          setDay(next);
+          // 2 digits, or a single digit that can't start a valid 2-digit day (4–9) → next box
+          if (next.length === 2 || (next.length === 1 && Number(next) >= 4)) monthRef.current?.focus();
+        }}
+      />
+      <input
+        ref={monthRef}
+        className={box}
+        inputMode="numeric"
+        placeholder={ar ? "شهر" : "Month"}
+        aria-label={ar ? "الشهر" : "Month"}
+        value={month}
+        onChange={(event) => {
+          const next = digitsOnly(event.target.value, 2);
+          setMonth(next);
+          if (next.length === 2 || (next.length === 1 && Number(next) >= 2)) yearRef.current?.focus();
+        }}
+      />
+      <input
+        ref={yearRef}
+        className={box}
+        inputMode="numeric"
+        placeholder={ar ? "سنة" : "Year"}
+        aria-label={ar ? "السنة" : "Year"}
+        value={year}
+        onChange={(event) => setYear(digitsOnly(event.target.value, 4))}
+      />
+    </div>
+  );
+}
+
+/* ------------------------------ v34: 6-digit email verification step ------------------------------ */
+
+const CODE_LENGTH = 6;
+const RESEND_SECONDS = 60;
+
+/**
+ * Calm code screen inside the auth card (24px card, 20px padding → 14px digit boxes).
+ * The boxes are always left-to-right, even in Arabic. Typing moves forward, Backspace on an empty
+ * box goes back, pasting (or the phone's one-time-code autofill) fills all six and submits.
+ */
+function EmailCodeStep({
+  email,
+  note,
+  onSubmit,
+  onResend,
+  onBack,
+  onDone,
+}: {
+  email: string;
+  note?: string;
+  onSubmit: (code: string) => Promise<string | null>;
+  onResend: () => Promise<{ ok: true } | { ok: false; error: string }>;
+  onBack: () => void;
+  onDone: () => void;
+}) {
+  const { t } = useI18n();
+  const [digits, setDigits] = useState<string[]>(() => Array(CODE_LENGTH).fill(""));
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [done, setDone] = useState(false);
+  const [left, setLeft] = useState(RESEND_SECONDS);
+  const [sent, setSent] = useState(false);
+  const boxes = useRef<Array<HTMLInputElement | null>>([]);
+  const row = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    boxes.current[0]?.focus();
+  }, []);
+  useEffect(() => {
+    if (left <= 0) return;
+    const timer = window.setTimeout(() => setLeft((value) => value - 1), 1000);
+    return () => window.clearTimeout(timer);
+  }, [left]);
+
+  function shake() {
+    if (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return;
+    row.current?.animate(
+      [{ transform: "translateX(0)" }, { transform: "translateX(-9px)" }, { transform: "translateX(8px)" }, { transform: "translateX(-5px)" }, { transform: "translateX(4px)" }, { transform: "translateX(0)" }],
+      { duration: 380, easing: "ease-out" },
+    );
+  }
+
+  async function submit(code: string) {
+    if (busy || done || code.length !== CODE_LENGTH) return;
+    setBusy(true);
+    setError(null);
+    const problem = await onSubmit(code).catch(() => t.verifyWrong);
+    if (problem) {
+      setBusy(false);
+      setError(problem);
+      setDigits(Array(CODE_LENGTH).fill(""));
+      shake();
+      window.setTimeout(() => boxes.current[0]?.focus(), 0);
+      return;
+    }
+    setDone(true);
+    window.setTimeout(onDone, 600);
+  }
+
+  /** Puts `text` (one digit or a pasted code) into the boxes starting at `from`. */
+  function fill(from: number, text: string) {
+    const clean = text.replace(/\D/g, "");
+    if (!clean) return;
+    const next = [...digits];
+    let index = from;
+    for (const digit of clean) {
+      if (index >= CODE_LENGTH) break;
+      next[index] = digit;
+      index += 1;
+    }
+    setDigits(next);
+    setError(null);
+    const code = next.join("");
+    if (code.length === CODE_LENGTH && !next.includes("")) {
+      boxes.current[CODE_LENGTH - 1]?.blur();
+      void submit(code);
+    } else {
+      boxes.current[Math.min(index, CODE_LENGTH - 1)]?.focus();
+    }
+  }
+
+  async function resend() {
+    if (left > 0 || busy) return;
+    setLeft(RESEND_SECONDS);
+    setSent(false);
+    const result = await onResend();
+    if (result.ok) {
+      setSent(true);
+      window.setTimeout(() => setSent(false), 5000);
+    } else {
+      setError(result.error);
+    }
+  }
+
+  const code = digits.join("");
+  return (
+    <div className="glass auth-card mx-auto w-[95vw] rounded-[24px] p-5 sm:max-w-md" role="region" aria-labelledby="verify-title">
+      {done ? (
+        <div className="flex flex-col items-center py-8 text-center" role="status" aria-live="polite">
+          <span className="grid size-16 place-items-center rounded-full bg-emerald-500 text-[#ffffff] shadow-[0_10px_30px_-10px_rgb(16_185_129/0.8)]">
+            <Check className="size-8" strokeWidth={2.5} aria-hidden />
+          </span>
+          <p className="mt-4 text-lg font-extrabold">{t.verifyDone}</p>
+        </div>
+      ) : (
+        <>
+          <div className="flex flex-col items-center text-center">
+            <span className="grid size-12 place-items-center rounded-[14px] bg-sky-500/10 text-[#0284C7] ring-1 ring-sky-500/25 dark:text-[#38BDF8]" aria-hidden>
+              <Mail className="size-6" strokeWidth={1.75} />
+            </span>
+            <h2 id="verify-title" className="mt-3 font-display text-xl font-extrabold">
+              {t.verifyTitle}
+            </h2>
+            {note ? <p className="mt-2 rounded-[14px] bg-sky-500/10 px-3 py-2 text-xs font-semibold text-[#0369A1] dark:text-[#7DD3FC]">{note}</p> : null}
+            <p className="mt-2 text-sm text-muted">{t.verifySub}</p>
+            <p className="mt-0.5 max-w-full truncate font-mono text-sm font-extrabold" dir="ltr">
+              {email}
+            </p>
+            <button type="button" onClick={onBack} className="mt-1 min-h-9 text-xs font-bold text-[#0284C7] underline-offset-4 hover:underline dark:text-[#38BDF8]">
+              {t.verifyChange}
+            </button>
+          </div>
+
+          <form
+            className="mt-5"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void submit(code);
+            }}
+          >
+            <fieldset aria-describedby={error ? "verify-error" : undefined}>
+              <legend className="sr-only">{t.verifyCodeLabel}</legend>
+              <div ref={row} className="flex justify-center gap-2 sm:gap-2.5" dir="ltr">
+                {digits.map((digit, index) => (
+                  <input
+                    key={index}
+                    ref={(node) => {
+                      boxes.current[index] = node;
+                    }}
+                    value={digit}
+                    inputMode="numeric"
+                    pattern="[0-9]*"
+                    autoComplete={index === 0 ? "one-time-code" : "off"}
+                    maxLength={index === 0 ? CODE_LENGTH : 1}
+                    aria-label={t.verifyDigit.replace("{n}", String(index + 1))}
+                    aria-invalid={Boolean(error)}
+                    disabled={busy}
+                    onFocus={(event) => event.currentTarget.select()}
+                    onChange={(event) => {
+                      const value = event.target.value.replace(/\D/g, "");
+                      if (!value) {
+                        const next = [...digits];
+                        next[index] = "";
+                        setDigits(next);
+                        return;
+                      }
+                      // One digit typed, or the whole code from autofill / a paste into one box.
+                      fill(index, value.length > 1 && digit ? value.replace(digit, "") || value : value);
+                    }}
+                    onPaste={(event) => {
+                      event.preventDefault();
+                      fill(index, event.clipboardData.getData("text"));
+                    }}
+                    onKeyDown={(event) => {
+                      if (event.key === "Backspace" && !digit && index > 0) {
+                        event.preventDefault();
+                        const next = [...digits];
+                        next[index - 1] = "";
+                        setDigits(next);
+                        boxes.current[index - 1]?.focus();
+                      } else if (event.key === "ArrowLeft" && index > 0) {
+                        event.preventDefault();
+                        boxes.current[index - 1]?.focus();
+                      } else if (event.key === "ArrowRight" && index < CODE_LENGTH - 1) {
+                        event.preventDefault();
+                        boxes.current[index + 1]?.focus();
+                      }
+                    }}
+                    className={`h-12 w-11 rounded-[14px] border bg-[#ffffff] text-center font-mono text-xl font-extrabold text-[#0F172A] outline-none transition-[border-color,box-shadow] focus:border-sky-500 focus:ring-2 focus:ring-sky-500/20 disabled:opacity-60 sm:h-14 sm:w-12 dark:bg-[#161E2E] dark:text-[#F8FAFC] ${
+                      error ? "border-rose-400" : digit ? "border-sky-400" : "border-slate-300 dark:border-white/15"
+                    }`}
+                  />
+                ))}
+              </div>
+            </fieldset>
+            {error ? (
+              <p id="verify-error" className="mt-3 text-center text-sm font-semibold text-rose-600 dark:text-rose-300" role="alert">
+                {error}
+              </p>
+            ) : null}
+            <button type="submit" disabled={busy || code.length !== CODE_LENGTH} className="btn-glow keep-white mt-5 min-h-12 w-full rounded-[14px] font-semibold text-white disabled:opacity-60">
+              {busy ? t.wait : t.verifyConfirm}
+            </button>
+          </form>
+
+          <div className="mt-4 min-h-6 text-center text-sm" aria-live="polite">
+            {sent ? (
+              <p className="font-semibold text-emerald-600 dark:text-emerald-400">{t.verifySent}</p>
+            ) : left > 0 ? (
+              <p className="text-muted tabular-nums">{t.verifyResendIn.replace("{n}", String(left))}</p>
+            ) : (
+              <button type="button" onClick={() => void resend()} className="min-h-10 font-bold text-[#0284C7] underline-offset-4 hover:underline dark:text-[#38BDF8]">
+                {t.verifyResendNow}
+              </button>
+            )}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
