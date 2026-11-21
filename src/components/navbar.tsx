@@ -3,8 +3,9 @@
 import { useEffect, useRef, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import { createPortal } from "react-dom";
+import { toast } from "sonner";
 import { Link, useNavigate } from "@/lib/nav";
-import { ArrowLeft, Bell, BellRing, CircleCheck, CircleX, Flame, Gamepad2, Home, Hourglass, Menu, MessageCircle, Plus, Receipt, ScrollText, Shield, Smartphone, Sparkles, Tv, Wallet, WalletCards, X, Zap } from "lucide-react";
+import { ArrowLeft, Bell, BellRing, CircleCheck, CircleX, Flame, Gamepad2, Home, Hourglass, Menu, MessageCircle, Plus, Receipt, ScrollText, Send, Shield, Smartphone, Sparkles, Tv, Wallet, WalletCards, X, Zap } from "lucide-react";
 import { enableNotifications, playTopupSuccessSound } from "@/components/admin-alerts";
 import { ReceiptBadge } from "@/components/receipt-badge";
 import { SignOutButton } from "@/components/confirm-dialog";
@@ -20,7 +21,7 @@ import { CurrencyPreviewSwitch } from "@/components/currency-switch";
 import { categoryName, useI18n, useMoney } from "@/lib/i18n";
 import { CATEGORIES } from "@/lib/store/types";
 import { APP_VERSION, subscribeScroll, useNovaUi } from "@/lib/ui-store";
-import { FEED_DAYS, listMyFeed, onStoreChange } from "@/lib/store/api";
+import { FEED_DAYS, getTelegramStatus, linkTelegram, listMyFeed, onStoreChange, unlinkTelegram, type TelegramStatus } from "@/lib/store/api";
 import type { FeedItem } from "@/lib/store/types";
 
 /** Ease-out (cubic-bezier-like) for the odometer. */
@@ -538,6 +539,7 @@ export function Navbar() {
                           </Link>
                         </>
                       ) : null}
+                      {profile ? <TelegramLinkRow /> : null}
                     </nav>
                   </div>
 
@@ -835,5 +837,72 @@ function GuestHyperIsland() {
         </span>
       </span>
     </button>
+  );
+}
+
+/** v36 · Link this account to Telegram: only this account's own alerts are sent there. */
+function TelegramLinkRow() {
+  const { language } = useI18n();
+  const ar = language === "ar";
+  const [status, setStatus] = useState<TelegramStatus | null>(null);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    let cancel = false;
+    const load = () => void getTelegramStatus().then((value) => !cancel && setStatus(value));
+    load();
+    // Coming back from Telegram after pressing Start: refresh the badge.
+    window.addEventListener("focus", load);
+    return () => {
+      cancel = true;
+      window.removeEventListener("focus", load);
+    };
+  }, []);
+  if (!status?.configured) return null;
+
+  async function link() {
+    // Open the tab right away (inside the tap), then point it at the bot — avoids popup blockers.
+    const tab = window.open("about:blank", "_blank");
+    setBusy(true);
+    const result = await linkTelegram();
+    setBusy(false);
+    if (!result.ok) {
+      tab?.close();
+      toast.error(result.error);
+      return;
+    }
+    if (tab) tab.location.href = result.url;
+    else window.location.href = result.url;
+    toast(ar ? "اضغط «Start» في تيليغرام لإتمام الربط" : "Press Start in Telegram to finish linking");
+  }
+
+  async function unlink() {
+    setBusy(true);
+    const result = await unlinkTelegram();
+    setBusy(false);
+    if (!result.ok) return toast.error(result.error);
+    setStatus({ configured: true, linked: false });
+    toast.success(ar ? "تم إلغاء ربط تيليغرام" : "Telegram unlinked");
+  }
+
+  return (
+    <div className="flex min-h-12 items-center gap-3 rounded-2xl px-3 text-sm font-semibold">
+      <span className="grid size-9 shrink-0 place-items-center rounded-xl bg-sky-500/10 text-sky-700 dark:text-sky-300">
+        <Send className="size-4" aria-hidden />
+      </span>
+      <span className="min-w-0 flex-1">
+        <span className="block truncate">{ar ? "تنبيهات تيليغرام" : "Telegram alerts"}</span>
+        <span className={`block text-[11px] font-bold ${status.linked ? "text-emerald-600 dark:text-emerald-400" : "text-muted"}`}>
+          {status.linked ? (ar ? "✓ مرتبط — تنبيهاتك فقط" : "✓ Linked — your alerts only") : ar ? "غير مرتبط" : "Not linked"}
+        </span>
+      </span>
+      <button
+        type="button"
+        disabled={busy}
+        onClick={() => void (status.linked ? unlink() : link())}
+        className={`min-h-10 shrink-0 rounded-full px-3 text-xs font-bold disabled:opacity-60 ${status.linked ? "border border-slate-300 dark:border-white/15" : "btn-glow keep-white text-white"}`}
+      >
+        {status.linked ? (ar ? "إلغاء الربط" : "Unlink") : ar ? "ربط حسابي" : "Link"}
+      </button>
+    </div>
   );
 }

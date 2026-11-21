@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-import { claimTelegramEvent, sendTelegram, telegramConfigured, tgEscape } from "@/lib/server/push";
+import { adminChatIds, claimTelegramEvent, sendTelegram, telegramConfigured, tgEscape } from "@/lib/server/push";
 import {
   VAULT_COLUMNS,
   VAULT_LEGACY_COLUMNS,
@@ -9,7 +9,7 @@ import {
   guardInstalled,
   loadServerState,
   loadServerStateWhere,
-  ownerFromBearer,
+  ownerFromRequest,
   userFromToken,
   vaultNeedsUpgrade,
   vaultPiece,
@@ -140,6 +140,7 @@ async function lowStockAlert(state: NovaState, order: NovaState["orders"][number
         count === 0 ? "⛔️ نفدت الأكواد بالكامل · 0 left" : `⚠️ المتبقي: <b>${count}</b> فقط`,
         "أضف أكواداً من «خزنة الحسابات» · /admin#vault-manager",
       ].join("\n"),
+      await adminChatIds(),
     );
   } catch {
     /* alerts never break a delivery */
@@ -191,7 +192,7 @@ async function adminPost(request: Request) {
   const state = await loadServerState();
   // v35: once SQL part 9 is installed, the vault (it holds unsold codes) needs the owner's verified
   // Supabase session — a store session alone could be forged. Before part 9: the store session, as before.
-  const owner = state ? await ownerFromBearer(request, state) : null;
+  const owner = await ownerFromRequest(request, state, body.token);
   const admin = owner ?? (state && !(await guardInstalled()) ? await adminFromToken(state, body.token) : null);
   if (!admin || !state) {
     return NextResponse.json(

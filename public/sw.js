@@ -9,8 +9,8 @@ const META_CACHE = "zovacharge-meta";
 const ICON = "/logo-icon.png";
 const BADGE = "/icons/badge-96.png";
 
-// v35: every release changes this line, so browsers install the new worker on the next visit.
-const SW_VERSION = "v35.0";
+// Every release changes this line, so browsers install the new worker on the next visit.
+const SW_VERSION = "v36.0";
 
 // Lifecycle: a new worker takes over at once (no waiting for every tab to close) and controls
 // the open pages straight away, so alerts never run on a stale worker after an update.

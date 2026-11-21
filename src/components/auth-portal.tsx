@@ -13,7 +13,7 @@ import { toast } from "sonner";
 
 import { useI18n } from "@/lib/i18n";
 import type { Currency } from "@/lib/store/types";
-import { completeGoogleSignIn, completeProfile, loginAccount, openGuestRecoveryTicket, registerAccount, resendEmailCode, resumePendingSignUp, startEmailSignUp, startGoogleSignIn, verifyEmailCode } from "@/lib/store/api";
+import { completeGoogleSignIn, completeProfile, finishEmailSignUp, loginAccount, openGuestRecoveryTicket, registerAccount, resendEmailCode, resumePendingSignUp, startEmailSignUp, startGoogleSignIn } from "@/lib/store/api";
 import { MIN_AGE, SY_MOBILE, ageFromBirthDate, formatSyMobile, loginSchema, registerSchema, zodError } from "@/lib/validation";
 
 type Tab = "login" | "register";
@@ -421,21 +421,8 @@ function AuthPortalForm({ initialTab = "login" }: { initialTab?: Tab }) {
   /** v34: the code is right → create the ZovaCharge account (marked verified). Returns an error or null. */
   async function finishVerification(code: string): Promise<string | null> {
     if (!verify) return t.verifyWrong;
-    const checked = await verifyEmailCode(verify.email, code, ar ? "ar" : "en");
-    if (!checked.ok) return checked.error;
-    const saved = checked.pending;
-    const data = verify.form ?? {
-      name: saved.name || verify.email.split("@")[0],
-      email: verify.email,
-      password: verify.password,
-      confirmPassword: verify.password,
-      currency: saved.currency || undefined,
-      phone: saved.phone,
-      birthDate: saved.birthDate,
-      acceptTerms: true,
-    };
-    const created = await registerAccount(data, { emailVerified: true });
-    return created.ok ? null : created.error;
+    // v36: the server checks the code and creates the account (verified).
+    return finishEmailSignUp(verify.email, code, verify.password, verify.form, ar ? "ar" : "en");
   }
 
   /** v25: no email codes — open a guest live-support chat flagged as urgent password recovery. */

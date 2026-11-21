@@ -155,7 +155,7 @@ export function subscribeScroll(listener: ScrollListener): () => void {
 
 
 /** Visible build tag (side-menu footer + admin header). Bump on every release. */
-export const APP_VERSION = "v35.0";
+export const APP_VERSION = "v36.0";
 
 /**
  * Anti-spam cooldown kept in localStorage (a refresh cannot skip it).

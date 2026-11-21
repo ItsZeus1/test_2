@@ -318,9 +318,44 @@ function storageMissingObject(error: { message?: string; statusCode?: string | n
   return message.includes("object not found") || message.includes("not found");
 }
 
+/* ------------------------------ v36: private reads (own data only) ------------------------------ */
+
+let readRpcMissing = false;
+let patchV2Missing = false;
+/** True when the server sent only the catalog + this browser's own account data (SQL part 10). */
+let viewRedacted = false;
+/** v36: the catalog tables refused this browser (only the owner writes them) — stop retrying. */
+let relationalDenied = false;
+
+function missingFunction(error: { code?: string; message?: string } | null): boolean {
+  const code = String(error?.code ?? "");
+  return code === "PGRST202" || code === "42883" || /could not find the function/i.test(error?.message ?? "");
+}
+
 async function readTable(): Promise<NovaState | null | "missing" | "blocked"> {
   const client = getSupabase();
   if (!client) return "blocked";
+  if (!readRpcMissing) {
+    const { data, error } = await client.rpc("novacharge_read", { p_token: readToken(), p_guest_key: readGuestSession()?.guestKey ?? null });
+    if (!error) {
+      const reply = data as { version?: number; payload?: unknown; redacted?: boolean } | null;
+      if (!reply) return null;
+      const parsed = normalizeState(reply.payload);
+      if (!parsed) {
+        modeDetail = "The store row could not be read. Nothing will be saved until it can.";
+        return "blocked";
+      }
+      if (typeof reply.version === "number") parsed.version = reply.version;
+      viewRedacted = reply.redacted === true;
+      return parsed;
+    }
+    if (!missingFunction(error)) {
+      modeDetail = error.message || "Private read was refused.";
+      return "blocked";
+    }
+    readRpcMissing = true; // SQL part 10 not installed yet: the classic read below
+  }
+  viewRedacted = false;
   const { data, error } = await client
     .from(CLOUD_TABLE)
     .select("id,version,payload,updated_at")
@@ -593,6 +628,8 @@ async function writeRelational(state: NovaState): Promise<void> {
   }
   // v31/v32: never write the catalog tables from an unverified copy or before a real catalog was read.
   if (!hasVerifiedRemoteRead || !hasConfirmedRemoteCatalog) return;
+  // v36: a private view never writes them, and once refused (owner-only tables) we stop asking.
+  if (viewRedacted || relationalDenied) return;
   try {
     const now = state.updatedAt;
     const serviceRows = state.services.map((service) => ({
@@ -650,6 +687,7 @@ async function writeRelational(state: NovaState): Promise<void> {
     ];
     const failed = steps.find((step) => step?.error);
     if (failed?.error) {
+      if (failed.error.code === "42501" || /row-level security/i.test(failed.error.message ?? "")) relationalDenied = true;
       catalogMode = missingRelation(failed.error) ? "missing" : "blocked";
       if (catalogMode === "blocked") modeDetail = failed.error.message || "Catalog tables rejected the write.";
       return;
@@ -796,7 +834,7 @@ function diffState(previous: NovaState, next: NovaState): PatchOp[] {
   const after = next as unknown as Record<string, unknown>;
   const keys = new Set([...Object.keys(before), ...Object.keys(after)]);
   for (const key of keys) {
-    if (key === "version" || key === "updatedAt") continue;
+    if (key === "version" || key === "updatedAt" || key === "topupStats") continue;
     const a = before[key];
     const b = after[key];
     if (JSON.stringify(a) === JSON.stringify(b)) continue;
@@ -829,13 +867,20 @@ async function pushPatch(state: NovaState): Promise<boolean> {
     if (state.version !== lastSynced.version) needsPull = true; // only the counter differs: realign
     return true;
   }
-  if (JSON.stringify(ops).length > 400_000) return false; // huge one-off change (e.g. a migration): send it whole
+  // Huge one-off change (e.g. a migration): sent whole — except from a private view, which never can.
+  if (!viewRedacted && JSON.stringify(ops).length > 400_000) return false;
   try {
-    const { data, error } = await client.rpc("novacharge_patch", { ops });
+    // v36: the save carries this browser's session token, so the database knows whose records may change.
+    let reply = patchV2Missing
+      ? await client.rpc("novacharge_patch", { ops })
+      : await client.rpc("novacharge_patch_v2", { ops, p_token: readToken(), p_guest_key: readGuestSession()?.guestKey ?? null });
+    if (!patchV2Missing && reply.error && missingFunction(reply.error)) {
+      patchV2Missing = true;
+      reply = await client.rpc("novacharge_patch", { ops });
+    }
+    const { data, error } = reply;
     if (error) {
-      const code = String((error as { code?: string }).code ?? "");
-      const message = String((error as { message?: string }).message ?? "");
-      if (code === "PGRST202" || code === "42883" || /could not find the function/i.test(message)) patchMissing = true;
+      if (missingFunction(error)) patchMissing = true;
       return false;
     }
     mode = "table";
@@ -862,7 +907,11 @@ async function pushCloud(state: NovaState): Promise<void> {
   }
   try {
     const patched = await pushPatch(state);
-    if (!patched) {
+    if (!patched && viewRedacted) {
+      // v36: a private view holds only this account's records — never upload it as the whole store.
+      needsPull = true;
+      modeDetail = "The change could not be saved. Reloading the latest store.";
+    } else if (!patched) {
       if (looksLikeWipe(state)) {
         // Never replace the whole store with a much smaller copy: re-download instead.
         needsPull = true;
@@ -888,6 +937,8 @@ async function pushCloud(state: NovaState): Promise<void> {
 
 function prefer(local: NovaState, remote: NovaState | null): NovaState {
   if (!remote) return local;
+  // v36: a private read is the truth for this account; an older full copy in this browser never wins.
+  if (viewRedacted) return remote;
   if (remote.version > local.version) return remote;
   if (local.version > remote.version) return local;
   return local.updatedAt >= remote.updatedAt ? local : remote;
@@ -897,7 +948,9 @@ async function heal(state: NovaState): Promise<NovaState> {
   const seeded = mergeSeedCatalog(state);
   const next = seeded.state;
   let changed = seeded.changed;
-  if (!next.users.some((user) => user.email.toLowerCase() === ADMIN_EMAIL)) {
+  if (viewRedacted) {
+    // v36: a customer's private view never contains the owner account — nothing to repair here.
+  } else if (!next.users.some((user) => user.email.toLowerCase() === ADMIN_EMAIL)) {
     const hashed = await hashPassword(ADMIN_PASSWORD);
     const now = new Date().toISOString();
     next.users.unshift({
@@ -970,11 +1023,13 @@ export function whenSynced(): Promise<void> {
  * v35: closed-browser admin alerts through the Telegram bot. Fire-and-forget: the server re-reads
  * the saved event (so nobody can make it send made-up text) and does nothing until the bot is set up.
  */
-function notifyTelegram(body: { kind: "topup" | "support" | "recovery" | "manual" | "honeypot"; id: string; messageId?: string }): void {
+type TelegramKind = "topup" | "support" | "recovery" | "manual" | "honeypot" | "topup_result" | "order_result" | "support_reply";
+
+function notifyTelegram(body: { kind: TelegramKind; id: string; messageId?: string }): void {
   if (typeof window === "undefined" || !supabaseEnv().enabled) return;
   void whenSynced()
     .then(() =>
-      fetch("/api/notify-telegram", {
+      fetch("/api/telegram/notify", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
@@ -986,9 +1041,8 @@ function notifyTelegram(body: { kind: "topup" | "support" | "recovery" | "manual
 
 function notifyAdmins(body: { kind: "topup" | "support" | "recovery" | "manual" | "topup_result" | "order_result"; id: string; messageId?: string }): void {
   if (typeof window === "undefined" || !supabaseEnv().enabled) return;
-  if (body.kind === "topup" || body.kind === "support" || body.kind === "recovery" || body.kind === "manual") {
-    notifyTelegram({ kind: body.kind, id: body.id, messageId: body.messageId });
-  }
+  // v36: admin events go to the admin chats, results to the customer's own Telegram (server decides).
+  notifyTelegram({ kind: body.kind, id: body.id, messageId: body.messageId });
   void whenSynced()
     .then(() =>
       fetch("/api/notify", {
@@ -1099,8 +1153,8 @@ function startRealtime(onSignal: () => void): void {
       liveChannel = client
         .channel("zovacharge-live-alerts", { config: { broadcast: { self: false } } })
         .on("broadcast", { event: "store_updated" }, onSignal)
-        // Needs the store table in the supabase_realtime publication (SQL part 5); harmless if not.
-        .on("postgres_changes", { event: "*", schema: "public", table: CLOUD_TABLE }, onSignal)
+        // v36: no row-change feed for the store any more (it would carry private data); the
+        // broadcast signal + the tiny version poll cover every change.
         .subscribe() as unknown as LiveChannel;
     } catch {
       liveChannel = null;
@@ -1673,7 +1727,63 @@ export async function warmupStore(): Promise<{ ok: true } | Err> {
   }
 }
 
-export async function registerAccount(input: unknown, options: { emailVerified?: boolean } = {}): Promise<Ok<{ token: string; profile: Profile }> | Err> {
+/* ------------------------------ v36: sign-in on the server ------------------------------ */
+
+type AuthReply = { ok?: boolean; token?: string; error?: string; fallback?: boolean; isNew?: boolean; ticket?: string };
+
+/** Calls /api/auth/<action>. `fallback` = the server can't do it (local preview without the service key). */
+async function authRequest(action: "login" | "register" | "email-code" | "google" | "logout", body: Record<string, unknown>): Promise<AuthReply> {
+  if (typeof window === "undefined") return { fallback: true };
+  try {
+    const response = await fetch(`/api/auth/${action}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(20_000),
+    });
+    if (response.status === 404) return { fallback: true };
+    const reply = (await response.json().catch(() => ({}))) as AuthReply;
+    if (response.status === 503 && reply.fallback) return { fallback: true };
+    return reply;
+  } catch {
+    const english = document.documentElement.lang === "en";
+    return { ok: false, error: english ? "The connection is slow — please try again." : "الاتصال بطيء — حاول مجدداً." };
+  }
+}
+
+/** Keeps the server-made session and downloads this account's (private) view of the store. */
+async function afterServerSignIn(token: string): Promise<Profile | null> {
+  writeToken(token);
+  viewerCache = null;
+  await enqueue(async () => {
+    needsPull = true;
+    memory = await loadAuthoritative();
+    emit();
+  });
+  notifyAuth();
+  return readProfile();
+}
+
+export type RegisterProof = { emailVerified?: boolean; emailTicket?: string; emailCode?: string; supabaseToken?: string };
+
+/** v36: the account is created on the server, after it checked the email code. */
+export async function registerAccount(input: unknown, options: RegisterProof = {}): Promise<Ok<{ token: string; profile: Profile }> | Err> {
+  const body = (unwrap(input) ?? {}) as Record<string, unknown>;
+  const reply = await authRequest("register", {
+    ...body,
+    language: document.documentElement.lang === "en" ? "en" : "ar",
+    emailTicket: options.emailTicket,
+    emailCode: options.emailCode,
+    supabaseToken: options.supabaseToken,
+  });
+  if (reply.fallback) return registerAccountLocal(input, options);
+  if (!reply.ok || !reply.token) return { ok: false, error: reply.error ?? "Could not create the account." };
+  const profile = await afterServerSignIn(reply.token);
+  if (!profile) return { ok: false, error: "Account saved, but the session could not be read." };
+  return { ok: true, token: reply.token, profile };
+}
+
+async function registerAccountLocal(input: unknown, options: { emailVerified?: boolean } = {}): Promise<Ok<{ token: string; profile: Profile }> | Err> {
   const parsed = registerSchema.safeParse(input);
   if (!parsed.success) return { ok: false, error: zodError(parsed.error) };
   try {
@@ -1766,7 +1876,21 @@ function countDailyLogin(user: StoredUser, text: (typeof LOGIN_TEXT)["ar"]): str
  *  - max 3 successful sign-ins per Damascus day (admins exempt);
  *  - the counters are written in the same save as the check, so they persist for every device.
  */
+/** v36: the password is checked on the server, which also creates the session. */
 export async function loginAccount(input: unknown, language: "ar" | "en" = "ar"): Promise<Ok<{ token: string; profile: Profile }> | Err> {
+  const parsed = loginSchema.safeParse(input);
+  if (!parsed.success) return { ok: false, error: zodError(parsed.error) };
+  const reply = await authRequest("login", { email: parsed.data.email, password: parsed.data.password, language });
+  if (reply.fallback) return loginAccountLocal(input, language);
+  if (!reply.ok || !reply.token) return { ok: false, error: reply.error ?? LOGIN_TEXT[language].wrong };
+  const profile = await afterServerSignIn(reply.token);
+  if (!profile) return { ok: false, error: "Signed in, but the profile could not be read." };
+  // The owner's optional Supabase session (v35) — harmless if it isn't set up.
+  if (isAdminEmail(parsed.data.email)) void activateOwnerSession(parsed.data.password).catch(() => undefined);
+  return { ok: true, token: reply.token, profile };
+}
+
+async function loginAccountLocal(input: unknown, language: "ar" | "en" = "ar"): Promise<Ok<{ token: string; profile: Profile }> | Err> {
   const parsed = loginSchema.safeParse(input);
   if (!parsed.success) return { ok: false, error: zodError(parsed.error) };
   const text = LOGIN_TEXT[language];
@@ -1856,10 +1980,17 @@ export function notifyAuth(): void {
 export async function logoutAccount(): Promise<void> {
   const token = readToken();
   writeToken(null);
+  viewerCache = null;
   // v35: also close the owner's secure Supabase session on this device.
   guardState = "unknown";
   void getSupabase()?.auth.signOut({ scope: "local" }).catch(() => undefined);
   if (!token) return;
+  // v36: the server deletes the session (browsers can't change sessions any more).
+  const reply = await authRequest("logout", { token });
+  if (!reply.fallback) {
+    needsPull = true;
+    return;
+  }
   const tokenHash = await sha256(token);
   await commit((state) => {
     state.sessions = state.sessions.filter((session) => session.tokenHash !== tokenHash);
@@ -2853,6 +2984,10 @@ export async function listMyTransactions(): Promise<WalletTxn[]> {
 export async function getTopupTiming(): Promise<TopupTiming> {
   await ensureReady();
   const state = memory ?? blankState();
+  if (viewRedacted && state.topupStats) {
+    const stats = state.topupStats;
+    return { averageMinutes: stats.sampleSize >= 3 ? stats.averageMinutes : null, fallbackMinutes: state.avgTopupMinutes || 3, sampleSize: stats.sampleSize };
+  }
   const samples = state.balanceRequests
     .filter((item) => item.status === "APPROVED" && item.resolvedAt && !item.referenceNote.startsWith("Admin credit"))
     .slice(0, 20)
@@ -3090,6 +3225,7 @@ export async function replyToSupportTicket(input: unknown): Promise<Ok<{ ticket:
       target.updatedAt = now;
       return { state, result: cloneTicket(target) };
     });
+    notifyTelegram({ kind: "support_reply", id: ticket.id }); // v36: the customer's own Telegram
     return { ok: true, ticket };
   } catch (error) {
     return { ok: false, error: fail(error) };
@@ -3432,6 +3568,14 @@ export async function completeGoogleSignIn(): Promise<Ok<{ profile: Profile; isN
     }
     guardState = "unknown";
   }
+  // v36: the server checks the Google token again and creates the session.
+  const server = await authRequest("google", { accessToken, language: document.documentElement.lang === "en" ? "en" : "ar" });
+  if (!server.fallback) {
+    if (!server.ok || !server.token) return { ok: false, error: server.error ?? "Google sign-in could not be verified. Please try again." };
+    const signedIn = await afterServerSignIn(server.token);
+    if (!signedIn) return { ok: false, error: "Signed in, but the profile could not be read." };
+    return { ok: true, profile: signedIn, isNew: server.isNew === true };
+  }
   const meta = (data.user.user_metadata ?? {}) as Record<string, unknown>;
   const fullName = String(meta.full_name ?? meta.name ?? email.split("@")[0]).slice(0, 60);
   const avatar = typeof meta.avatar_url === "string" ? meta.avatar_url : "";
@@ -3707,8 +3851,8 @@ export async function openGuestRecoveryTicket(input: { email: string; phone: str
             id: messageId,
             sender: "USER",
             text: ar
-              ? `طلب استعادة كلمة المرور للحساب: ${email} — الهاتف: ${phone}${known ? "" : " (لا يوجد حساب بهذا البريد)"}`
-              : `Password recovery request for: ${email} — phone: ${phone}${known ? "" : " (no account with this email)"}`,
+              ? `طلب استعادة كلمة المرور للحساب: ${email} — الهاتف: ${phone}${known || viewRedacted ? "" : " (لا يوجد حساب بهذا البريد)"}`
+              : `Password recovery request for: ${email} — phone: ${phone}${known || viewRedacted ? "" : " (no account with this email)"}`,
             createdAt: now,
           },
           {
@@ -4448,10 +4592,12 @@ export async function refreshGuardStatus(): Promise<GuardState> {
     return guardState;
   }
   try {
-    const { data, error } = await withTimeout(client.rpc("nova_guard_status"), 4500);
+    const token = readToken();
+    let reply = await withTimeout(token ? client.rpc("nova_guard_status", { p_token: token }) : client.rpc("nova_guard_status"), 4500);
+    if (token && reply.error && missingFunction(reply.error)) reply = await withTimeout(client.rpc("nova_guard_status"), 4500); // part 9 only
+    const { data, error } = reply;
     if (error) {
-      const code = String((error as { code?: string }).code ?? "");
-      if (code === "PGRST202" || code === "42883" || /could not find the function/i.test(error.message ?? "")) guardState = "absent";
+      if (missingFunction(error)) guardState = "absent";
     } else {
       guardState = (data as { admin?: boolean } | null)?.admin ? "trusted" : "untrusted";
     }
@@ -4532,10 +4678,14 @@ export async function downloadAdminBackup(): Promise<{ ok: true; blob: Blob; fil
   const client = getSupabase();
   if (!client) return { ok: false, error: "Supabase is not configured on this site." };
   const { data } = await client.auth.getSession();
-  const token = data.session?.access_token;
-  if (!token) return { ok: false, error: ownerSessionText() };
+  const bearer = data.session?.access_token;
+  const store = readToken();
+  if (!bearer && !store) return { ok: false, error: ownerSessionText() };
+  const headers: Record<string, string> = {};
+  if (bearer) headers.Authorization = `Bearer ${bearer}`;
+  if (store) headers["x-zova-token"] = store; // v36: the owner's server-made session (checked on the server)
   try {
-    const response = await fetch("/api/admin-backup", { headers: { Authorization: `Bearer ${token}` }, cache: "no-store", signal: AbortSignal.timeout(30_000) });
+    const response = await fetch("/api/admin-backup", { headers, cache: "no-store", signal: AbortSignal.timeout(30_000) });
     if (!response.ok) {
       const body = (await response.json().catch(() => ({}))) as { error?: string };
       return { ok: false, error: body.error ?? (response.status === 401 || response.status === 403 ? ownerSessionText() : `HTTP ${response.status}`) };
@@ -4640,8 +4790,17 @@ export async function startEmailSignUp(input: { email: string; password: string 
   const client = getSupabase();
   // Without Supabase (local preview) there is nobody to send a code: register directly.
   if (!client) return { ok: true, status: "skip" };
-  if (await accountExists(input.email)) return { ok: false, error: text.exists };
   const email = input.email.trim().toLowerCase();
+  // v36: the site sends its own 6-digit email (Resend) — no Supabase template involved.
+  const server = await authRequest("email-code", { email, language });
+  if (server.ok && server.ticket) {
+    codeChannel.set(email, "resend");
+    codeTickets.set(email, server.ticket);
+    return { ok: true, status: "verify" };
+  }
+  if (!server.fallback) return { ok: false, error: server.error ?? text.send };
+  // Resend isn't set up on the server: Supabase's confirmation email (v35 path).
+  if (await accountExists(input.email)) return { ok: false, error: text.exists };
   const meta = { full_name: input.name, phone: input.phone, birthdate: input.birthDate, currency: input.currency ?? "" };
   try {
     const { data, error } = await withTimeout(client.auth.signUp({ email, password: input.password, options: { data: meta } }), 6000);
@@ -4668,8 +4827,10 @@ export async function startEmailSignUp(input: { email: string; password: string 
   }
 }
 
-/** Which Supabase email the code came in: the sign-up confirmation or a sign-in ("Magic Link") code. */
-const codeChannel = new Map<string, "signup" | "email">();
+/** Which email the code came in: ours (Resend), Supabase's sign-up confirmation, or a Supabase sign-in code. */
+const codeChannel = new Map<string, "resend" | "signup" | "email">();
+/** v36: signed ticket for our own code (the code itself is only in the email). */
+const codeTickets = new Map<string, string>();
 
 async function sendEmailOtp(email: string, meta: Record<string, string>, text: ReturnType<typeof verifyText>): Promise<EmailCodeStart> {
   const client = getSupabase();
@@ -4690,6 +4851,12 @@ export async function resendEmailCode(email: string, language: "ar" | "en" = "ar
   const client = getSupabase();
   if (!client) return { ok: false, error: text.slow };
   const lower = email.trim().toLowerCase();
+  if (codeChannel.get(lower) === "resend") {
+    const server = await authRequest("email-code", { email: lower, language });
+    if (!server.ok || !server.ticket) return { ok: false, error: server.error ?? text.send };
+    codeTickets.set(lower, server.ticket);
+    return { ok: true };
+  }
   try {
     const { error } =
       codeChannel.get(lower) === "email"
@@ -4706,7 +4873,7 @@ export async function resendEmailCode(email: string, language: "ar" | "en" = "ar
  * Checks the 6-digit code. On success returns the details saved at sign-up (for a visitor who
  * comes back later) and closes the temporary Supabase session — ZovaCharge keeps its own.
  */
-export async function verifyEmailCode(email: string, code: string, language: "ar" | "en" = "ar"): Promise<Ok<{ pending: PendingSignUp }> | Err> {
+export async function verifyEmailCode(email: string, code: string, language: "ar" | "en" = "ar"): Promise<Ok<{ pending: PendingSignUp; supabaseToken: string }> | Err> {
   const text = verifyText(language === "ar");
   const client = getSupabase();
   if (!client) return { ok: false, error: text.slow };
@@ -4719,9 +4886,13 @@ export async function verifyEmailCode(email: string, code: string, language: "ar
       if (error || !data.user) continue;
       const meta = (data.user.user_metadata ?? {}) as Record<string, unknown>;
       const str = (value: unknown) => (typeof value === "string" ? value : "");
-      await client.auth.signOut({ scope: "local" }).catch(() => undefined);
+      // v36: the temporary session is closed by finishEmailSignUp, after the server checked it.
       codeChannel.delete(lower);
-      return { ok: true, pending: { name: str(meta.full_name), phone: str(meta.phone), birthDate: str(meta.birthdate), currency: str(meta.currency) || undefined } };
+      return {
+        ok: true,
+        supabaseToken: data.session?.access_token ?? "",
+        pending: { name: str(meta.full_name), phone: str(meta.phone), birthDate: str(meta.birthdate), currency: str(meta.currency) || undefined },
+      };
     }
     return { ok: false, error: text.wrong };
   } catch {
@@ -4753,4 +4924,87 @@ export async function resumePendingSignUp(email: string, password: string): Prom
   } catch {
     return false;
   }
+}
+
+/**
+ * v36 · Code typed → the server creates the account (it checks the code itself). `form` is the
+ * sign-up just submitted; without it (coming back from the sign-in form) the details saved with
+ * the Supabase sign-up are used. Returns an error text, or null on success.
+ */
+export async function finishEmailSignUp(email: string, code: string, password: string, form: Record<string, unknown> | undefined, language: "ar" | "en" = "ar"): Promise<string | null> {
+  const text = verifyText(language === "ar");
+  const lower = email.trim().toLowerCase();
+  if (!/^\d{6}$/.test(code)) return text.wrong;
+  if (codeChannel.get(lower) === "resend") {
+    if (!form) return text.wrong;
+    const created = await registerAccount(form, { emailTicket: codeTickets.get(lower), emailCode: code });
+    if (created.ok) {
+      codeChannel.delete(lower);
+      codeTickets.delete(lower);
+    }
+    return created.ok ? null : created.error;
+  }
+  const checked = await verifyEmailCode(email, code, language);
+  if (!checked.ok) return checked.error;
+  const saved = checked.pending;
+  const data = form ?? {
+    name: saved.name || lower.split("@")[0],
+    email: lower,
+    password,
+    confirmPassword: password,
+    currency: saved.currency || "USD",
+    phone: saved.phone,
+    birthDate: saved.birthDate,
+    acceptTerms: true,
+  };
+  const created = await registerAccount(data, { emailVerified: true, supabaseToken: checked.supabaseToken });
+  await getSupabase()?.auth.signOut({ scope: "local" }).catch(() => undefined);
+  return created.ok ? null : created.error;
+}
+
+/* ------------------------------ v36: Telegram links (each account its own alerts) ------------------------------ */
+
+async function telegramRequest<T>(action: "status" | "link" | "unlink" | "admin", body: Record<string, unknown> = {}): Promise<T & { ok?: boolean; error?: string }> {
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (action === "admin") {
+    const session = (await getSupabase()?.auth.getSession())?.data.session;
+    if (session?.access_token) headers.Authorization = `Bearer ${session.access_token}`;
+  }
+  try {
+    const response = await fetch(`/api/telegram/${action}`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ token: readToken(), ...body }),
+      signal: AbortSignal.timeout(15_000),
+    });
+    return (await response.json().catch(() => ({ ok: false, error: `HTTP ${response.status}` }))) as T & { ok?: boolean; error?: string };
+  } catch {
+    return { ok: false, error: "Telegram setup could not be reached." } as T & { ok?: boolean; error?: string };
+  }
+}
+
+export type TelegramStatus = { configured: boolean; linked: boolean };
+
+export async function getTelegramStatus(): Promise<TelegramStatus> {
+  if (!readToken()) return { configured: false, linked: false };
+  const reply = await telegramRequest<{ configured?: boolean; linked?: boolean }>("status");
+  return { configured: reply.configured !== false && reply.ok !== false, linked: reply.linked === true };
+}
+
+/** One-time link that opens the bot; pressing Start links this account. */
+export async function linkTelegram(): Promise<{ ok: true; url: string } | Err> {
+  const reply = await telegramRequest<{ url?: string }>("link");
+  return reply.ok && reply.url ? { ok: true, url: reply.url } : { ok: false, error: reply.error ?? "Telegram is not set up yet." };
+}
+
+export async function unlinkTelegram(): Promise<{ ok: true } | Err> {
+  const reply = await telegramRequest("unlink");
+  return reply.ok ? { ok: true } : { ok: false, error: reply.error ?? "Could not unlink." };
+}
+
+export type TelegramAdminChat = { chat_id: string; tg_username: string; tg_name: string; linked_at: string };
+
+/** Owner: connect the bot (webhook), list / add (max 3) / remove the admin chats. */
+export async function adminTelegram(op: "setup" | "list" | "link" | "remove", chatId?: string) {
+  return telegramRequest<{ admins?: TelegramAdminChat[]; max?: number; url?: string; bot?: string; configured?: boolean; needsSql?: boolean }>("admin", { op, chatId });
 }

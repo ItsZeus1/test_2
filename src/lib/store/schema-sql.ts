@@ -397,31 +397,29 @@ $$;
 grant execute on function public.novacharge_patch(jsonb) to anon, authenticated;
 `;
 
-/** v35 · SQL part 9 (money protection). Same text as supabase_v35_security.sql at the project root. */
+/** v36 · SQL parts 9 + 10 (money protection + private accounts). Same text as supabase_v36_security.sql at the project root. */
 export const NOVACHARGE_SECURITY_SQL = `-- =====================================================================
--- ZovaCharge v35 · PART 9 · Money protection (paste once in Supabase → SQL Editor → Run)
+-- ZovaCharge v36 · PARTS 9 + 10 · Money protection + private accounts
+-- (paste the WHOLE file once in Supabase → SQL Editor → Run)
 -- =====================================================================
--- Safe to re-run. Needs parts 1 and 7 (and part 8 for vault sizes). Run it AFTER them, and
--- run it again if you ever re-run part 1 (part 1 re-opens the old public write rules).
+-- Safe to re-run. Needs parts 1 and 7 (and parts 3 + 8 for the vault). Run it AFTER them, and
+-- run it again if you ever re-run part 1 (part 1 re-opens the old public rules).
+-- Deploy the v36 site FIRST, then run this file (the v36 site works before and after it).
 --
--- Where the money lives: everything is stored in ONE jsonb row, public.novacharge_state
--- (id = 'primary'). In that row a wallet balance is users[].balanceCents, the role is
--- users[].role and the lock is users[].isLocked / users[].isBlocked — there are no separate
--- balance_usd / role / is_locked columns, so the protection below works on that row:
+-- Everything lives in ONE jsonb row, public.novacharge_state (id = 'primary'): balances are
+-- users[].balanceCents, roles users[].role, locks users[].isLocked / isBlocked.
 --
---   1. purchase_service_atomic(...)  one locked transaction (SELECT … FOR UPDATE) that reads
---      the price from the database copy of the catalog, checks the balance, takes a vault piece
---      (FOR UPDATE SKIP LOCKED), charges, records the order and the ledger line. The same order
---      id can never charge twice, and two clicks at once are serialised by the row lock.
---   2. nova_money_guard trigger      every save that does not come from the verified owner
---      (the confirmed Supabase account majd@elmadani.com), the server key or the SQL editor is checked:
---      balances, roles, locks, prices, payment addresses, approvals and the ledger are put back
---      to their saved values, and new orders can only be created by purchase_service_atomic.
---   3. Row level security             the public key can no longer write or delete the store
---      row directly, and only the verified owner can write the catalog tables.
+--   PART 9  · purchase_service_atomic: price from the database, balance + vault piece locked in one
+--             transaction, never charged twice. The guard trigger puts back any money / price /
+--             catalog / approval change that does not come from the owner or the server.
+--   PART 10 · Sign-in happens on the server (/api/auth), so sessions can't be faked. Browsers can no
+--             longer download the store: novacharge_read returns the catalog + ONLY the caller's own
+--             account, orders, wallet and tickets (the owner gets everything). Saves carry the session
+--             token, and a browser can only change its own records. Tables for Telegram links and
+--             email codes (server only).
 --
--- Emergency undo (puts saving back exactly as it was before v35):
---   drop trigger if exists nova_money_guard on public.novacharge_state;
+-- Emergency undo of the save guard:  drop trigger if exists nova_money_guard on public.novacharge_state;
+-- Emergency undo of private reads:   grant select on public.novacharge_state to anon, authenticated;
 -- =====================================================================
 
 -- ---------------------------------------------------------------------
@@ -499,7 +497,7 @@ begin
 end;
 $$;
 
--- Lets the app show "secure owner session: on / off" and know that v35 is installed.
+-- Lets the app show "secure owner session: on / off" and know which version is installed.
 create or replace function public.nova_guard_status()
 returns jsonb
 language sql
@@ -623,8 +621,11 @@ end;
 $$;
 
 -- ---------------------------------------------------------------------
--- 3) The guard: untrusted saves cannot move money
+-- 3) The guard: browsers can only change their OWN records, never money
 -- ---------------------------------------------------------------------
+-- Who is saving: novacharge_patch_v2 checks the browser's session token and sets
+-- nova.viewer (the account id) and nova.guest (a guest ticket key). Sessions are created by the
+-- server only, so this identity can't be faked. The owner's token makes the save trusted.
 create or replace function public.nova_money_guard()
 returns trigger
 language plpgsql
@@ -635,10 +636,16 @@ declare
   o jsonb;
   n jsonb;
   k text;
+  v text := coalesce(current_setting('nova.viewer', true), '');
+  g text := coalesce(current_setting('nova.guest', true), '');
   frozen text[] := array[
     'services', 'packages', 'sypRate', 'shamcashAddress', 'syriatelCashAddress', 'mtnCashAddress',
     'serviceGroups', 'heroBanners', 'offersTickerText', 'offersTickerTextAr', 'offersTickerUpdatedAt',
-    'deletedSlugs', 'avgTopupMinutes', 'transactions'
+    'deletedSlugs', 'avgTopupMinutes', 'transactions', 'sessions'
+  ];
+  user_locked text[] := array[
+    'id', 'balanceCents', 'role', 'isBlocked', 'email', 'passwordHash', 'passwordSalt', 'authProvider',
+    'emailVerified', 'failedLoginAttempts', 'lastFailedLoginAt', 'dailyLoginCount', 'lastLoginDate', 'createdAt'
   ];
   omap jsonb;
   nmap jsonb;
@@ -646,7 +653,8 @@ declare
   e jsonb;
   fixed jsonb;
   out_list jsonb;
-  admin_known boolean;
+  head_list jsonb;
+  pending_topup boolean;
   before_text text;
 begin
   if tg_op = 'INSERT' then
@@ -660,115 +668,160 @@ begin
     return new;
   end if;
   before_text := n::text;
-  -- A browser may never jump the version far ahead (that would freeze everyone else's saves).
   if new.version > old.version + 1000 then
     new.version := old.version + 1;
     n := n || jsonb_build_object('version', new.version);
   end if;
 
-  -- a) Catalog, prices, payment addresses, rate and the ledger: owner only.
+  -- a) Catalog, prices, payment addresses, rate, ledger and sign-in sessions: owner / server only.
   foreach k in array frozen loop
     if (n->k) is distinct from (o->k) then
       n := public.nova_keep(n, o, k);
     end if;
   end loop;
 
-  -- b) Accounts: balance / role / block never change here, an unlock is undone, new accounts
-  --    start at 0 as NORMAL, and accounts can't be deleted.
-  if jsonb_typeof(n->'users') <> 'array' then
-    n := public.nova_keep(n, o, 'users');
-  elsif jsonb_typeof(o->'users') = 'array' then
-    select coalesce(jsonb_object_agg(x->>'id', x), '{}'::jsonb) into omap from jsonb_array_elements(o->'users') x where x ? 'id';
-    select coalesce(jsonb_object_agg(x->>'id', true), '{}'::jsonb) into nmap from jsonb_array_elements(n->'users') x where x ? 'id';
-    select exists (select 1 from jsonb_array_elements(o->'users') x where lower(coalesce(x->>'email', '')) = 'majd@elmadani.com') into admin_known;
+  -- b) Accounts. Only the signed-in account's own record can change (name, phone, photo, saved IDs…);
+  --    balance, role, block / lock, email, password and sign-in counters never change here.
+  --    New accounts are created by the server only; no account can be deleted.
+  if jsonb_typeof(o->'users') = 'array' then
+    select coalesce(jsonb_object_agg(x->>'id', x), '{}'::jsonb) into nmap
+      from jsonb_array_elements(case when jsonb_typeof(n->'users') = 'array' then n->'users' else '[]'::jsonb end) x where x ? 'id';
+    select exists (
+      select 1 from jsonb_array_elements(coalesce(o->'balanceRequests', '[]'::jsonb)) r
+       where r->>'userId' = v and r->>'status' = 'PROCESSING'
+    ) into pending_topup;
     out_list := '[]'::jsonb;
-    for e in select value from jsonb_array_elements(n->'users') loop
-      prev := omap->(e->>'id');
-      if prev is null then
-        fixed := e || jsonb_build_object('balanceCents', 0, 'isBlocked', false);
-        if not (lower(coalesce(e->>'email', '')) = 'majd@elmadani.com' and not admin_known) then
-          fixed := fixed || jsonb_build_object('role', 'NORMAL');
-        end if;
-      else
-        fixed := public.nova_keep(e, prev, 'balanceCents');
-        fixed := public.nova_keep(fixed, prev, 'role');
-        fixed := public.nova_keep(fixed, prev, 'isBlocked');
+    for prev in select value from jsonb_array_elements(o->'users') loop
+      e := nmap->(prev->>'id');
+      if v <> '' and prev->>'id' = v and e is not null then
+        fixed := e;
+        foreach k in array user_locked loop
+          fixed := public.nova_keep(fixed, prev, k);
+        end loop;
         if coalesce(prev->>'isLocked', 'false') = 'true' then
           fixed := fixed || '{"isLocked": true}'::jsonb;
         end if;
         if coalesce(prev->>'honeypotFlagged', 'false') = 'true' then
           fixed := fixed || '{"honeypotFlagged": true}'::jsonb;
         end if;
-        if lower(coalesce(fixed->>'email', '')) = 'majd@elmadani.com' and lower(coalesce(prev->>'email', '')) <> 'majd@elmadani.com' then
-          fixed := public.nova_keep(fixed, prev, 'email');
+        -- The wallet currency can only change while the wallet is empty and no top-up is waiting.
+        if (fixed->'currency') is distinct from (prev->'currency')
+           and (public.nova_num(prev->'balanceCents', 0) <> 0 or pending_topup) then
+          fixed := public.nova_keep(fixed, prev, 'currency');
         end if;
-      end if;
-      out_list := out_list || jsonb_build_array(fixed);
-    end loop;
-    for e in select value from jsonb_array_elements(o->'users') loop
-      if (e ? 'id') and not (nmap ? (e->>'id')) then
-        out_list := out_list || jsonb_build_array(e);
+        out_list := out_list || jsonb_build_array(fixed);
+      else
+        out_list := out_list || jsonb_build_array(prev);
       end if;
     end loop;
     n := jsonb_set(n, '{users}', out_list, true);
   end if;
 
-  -- c) Orders: only purchase_service_atomic creates them. Price / owner / refund never change;
-  --    the only status change allowed is "processing" or "PENDING_VAULT" → "delivered".
-  if jsonb_typeof(n->'orders') <> 'array' then
-    n := public.nova_keep(n, o, 'orders');
-  elsif jsonb_typeof(o->'orders') = 'array' then
-    select coalesce(jsonb_object_agg(x->>'id', x), '{}'::jsonb) into omap from jsonb_array_elements(o->'orders') x where x ? 'id';
-    select coalesce(jsonb_object_agg(x->>'id', true), '{}'::jsonb) into nmap from jsonb_array_elements(n->'orders') x where x ? 'id';
+  -- c) Orders: only purchase_service_atomic creates them. A browser may only move its own
+  --    "processing" / "PENDING_VAULT" order to "delivered"; nothing else changes, nothing is deleted.
+  if jsonb_typeof(o->'orders') = 'array' then
+    select coalesce(jsonb_object_agg(x->>'id', x), '{}'::jsonb) into nmap
+      from jsonb_array_elements(case when jsonb_typeof(n->'orders') = 'array' then n->'orders' else '[]'::jsonb end) x where x ? 'id';
     out_list := '[]'::jsonb;
-    for e in select value from jsonb_array_elements(n->'orders') loop
-      prev := omap->(e->>'id');
-      continue when prev is null;
-      fixed := e;
-      foreach k in array array['priceCents', 'userId', 'currency', 'serviceId', 'packageId', 'roleAtPurchase', 'refunded', 'refundedAt', 'receiptNumber'] loop
-        fixed := public.nova_keep(fixed, prev, k);
-      end loop;
-      if (fixed->>'status') is distinct from (prev->>'status')
-         and not (coalesce(prev->>'status', '') in ('processing', 'PENDING_VAULT') and fixed->>'status' = 'delivered') then
-        fixed := public.nova_keep(fixed, prev, 'status');
-        fixed := public.nova_keep(fixed, prev, 'resolvedAt');
-      end if;
-      out_list := out_list || jsonb_build_array(fixed);
-    end loop;
-    for e in select value from jsonb_array_elements(o->'orders') loop
-      if (e ? 'id') and not (nmap ? (e->>'id')) then
-        out_list := out_list || jsonb_build_array(e);
+    for prev in select value from jsonb_array_elements(o->'orders') loop
+      e := nmap->(prev->>'id');
+      if v <> '' and prev->>'userId' = v and e is not null
+         and coalesce(prev->>'status', '') in ('processing', 'PENDING_VAULT') and e->>'status' = 'delivered' then
+        fixed := prev || jsonb_build_object('status', 'delivered');
+        if e ? 'resolvedAt' then
+          fixed := fixed || jsonb_build_object('resolvedAt', e->'resolvedAt');
+        end if;
+        out_list := out_list || jsonb_build_array(fixed);
+      else
+        out_list := out_list || jsonb_build_array(prev);
       end if;
     end loop;
     n := jsonb_set(n, '{orders}', out_list, true);
   end if;
 
-  -- d) Top-up requests: customers may add new ones (always "PROCESSING"); approvals,
-  --    amounts and references of existing ones are owner-only; pending ones can't vanish.
-  if jsonb_typeof(n->'balanceRequests') <> 'array' then
-    n := public.nova_keep(n, o, 'balanceRequests');
-  elsif jsonb_typeof(o->'balanceRequests') = 'array' then
-    select coalesce(jsonb_object_agg(x->>'id', x), '{}'::jsonb) into omap from jsonb_array_elements(o->'balanceRequests') x where x ? 'id';
-    select coalesce(jsonb_object_agg(x->>'id', true), '{}'::jsonb) into nmap from jsonb_array_elements(n->'balanceRequests') x where x ? 'id';
+  -- d) Top-up requests: the signed-in customer may add their own (always "PROCESSING", with a
+  --    unique receipt); existing requests never change here and can't be deleted.
+  if jsonb_typeof(o->'balanceRequests') = 'array' then
+    select coalesce(jsonb_object_agg(x->>'id', true), '{}'::jsonb) into omap from jsonb_array_elements(o->'balanceRequests') x where x ? 'id';
+    head_list := '[]'::jsonb;
+    if v <> '' and jsonb_typeof(n->'balanceRequests') = 'array' then
+      for e in select value from jsonb_array_elements(n->'balanceRequests') loop
+        if (e ? 'id') and not (omap ? (e->>'id')) and e->>'userId' = v then
+          fixed := e || jsonb_build_object('status', 'PROCESSING', 'resolvedAt', null);
+          if coalesce(fixed->>'receiptNumber', '') = '' or exists (
+            select 1 from jsonb_array_elements(o->'balanceRequests') r where r->>'receiptNumber' = fixed->>'receiptNumber'
+          ) then
+            fixed := fixed || jsonb_build_object('receiptNumber', 'TOP-' || (100000 + floor(random() * 900000))::integer::text);
+          end if;
+          head_list := head_list || jsonb_build_array(fixed);
+        end if;
+      end loop;
+    end if;
+    n := jsonb_set(n, '{balanceRequests}', head_list || (o->'balanceRequests'), true);
+  end if;
+
+  -- e) Support chats: a customer may open / write in their own tickets, a guest only in the
+  --    ticket whose key they hold. Other people's tickets never change; none can be deleted.
+  if jsonb_typeof(o->'supportTickets') = 'array' or jsonb_typeof(n->'supportTickets') = 'array' then
+    select coalesce(jsonb_object_agg(x->>'id', x), '{}'::jsonb) into nmap
+      from jsonb_array_elements(case when jsonb_typeof(n->'supportTickets') = 'array' then n->'supportTickets' else '[]'::jsonb end) x where x ? 'id';
+    select coalesce(jsonb_object_agg(x->>'id', true), '{}'::jsonb) into omap
+      from jsonb_array_elements(case when jsonb_typeof(o->'supportTickets') = 'array' then o->'supportTickets' else '[]'::jsonb end) x where x ? 'id';
+    head_list := '[]'::jsonb;
+    if jsonb_typeof(n->'supportTickets') = 'array' then
+      for e in select value from jsonb_array_elements(n->'supportTickets') loop
+        if (e ? 'id') and not (omap ? (e->>'id'))
+           and ((v <> '' and e->>'userId' = v) or (coalesce(e->>'guest', 'false') = 'true' and coalesce(e->>'guestKey', '') <> '')) then
+          head_list := head_list || jsonb_build_array(e);
+        end if;
+      end loop;
+    end if;
     out_list := '[]'::jsonb;
-    for e in select value from jsonb_array_elements(n->'balanceRequests') loop
-      prev := omap->(e->>'id');
-      if prev is null then
-        fixed := e || jsonb_build_object('status', 'PROCESSING', 'resolvedAt', null);
+    if jsonb_typeof(o->'supportTickets') = 'array' then
+      for prev in select value from jsonb_array_elements(o->'supportTickets') loop
+        e := nmap->(prev->>'id');
+        if e is not null and (
+             (v <> '' and prev->>'userId' = v)
+          or (g <> '' and coalesce(prev->>'guestKey', '') = g)
+        ) then
+          fixed := e;
+          foreach k in array array['userId', 'userEmail', 'guest', 'guestKey', 'ticketNumber', 'category'] loop
+            fixed := public.nova_keep(fixed, prev, k);
+          end loop;
+          out_list := out_list || jsonb_build_array(fixed);
+        else
+          out_list := out_list || jsonb_build_array(prev);
+        end if;
+      end loop;
+    end if;
+    n := jsonb_set(n, '{supportTickets}', head_list || out_list, true);
+  end if;
+
+  -- f) Admin-URL trap log: new events may be added, a PIN may be added once; nothing is removed.
+  if jsonb_typeof(o->'honeypotEvents') = 'array' or jsonb_typeof(n->'honeypotEvents') = 'array' then
+    select coalesce(jsonb_object_agg(x->>'id', x), '{}'::jsonb) into nmap
+      from jsonb_array_elements(case when jsonb_typeof(n->'honeypotEvents') = 'array' then n->'honeypotEvents' else '[]'::jsonb end) x where x ? 'id';
+    select coalesce(jsonb_object_agg(x->>'id', true), '{}'::jsonb) into omap
+      from jsonb_array_elements(case when jsonb_typeof(o->'honeypotEvents') = 'array' then o->'honeypotEvents' else '[]'::jsonb end) x where x ? 'id';
+    head_list := '[]'::jsonb;
+    for e in select value from jsonb_array_elements(case when jsonb_typeof(n->'honeypotEvents') = 'array' then n->'honeypotEvents' else '[]'::jsonb end) loop
+      if (e ? 'id') and not (omap ? (e->>'id')) then
+        head_list := head_list || jsonb_build_array(e);
+      end if;
+    end loop;
+    out_list := '[]'::jsonb;
+    for prev in select value from jsonb_array_elements(case when jsonb_typeof(o->'honeypotEvents') = 'array' then o->'honeypotEvents' else '[]'::jsonb end) loop
+      e := nmap->(prev->>'id');
+      if e is not null and not (prev ? 'enteredPayload') and (e ? 'enteredPayload') then
+        out_list := out_list || jsonb_build_array(prev || jsonb_build_object('enteredPayload', left(e->>'enteredPayload', 32)));
       else
-        fixed := e;
-        foreach k in array array['status', 'cents', 'userId', 'resolvedAt', 'transferNumber', 'transactionRef', 'isDuplicateRef', 'method', 'currency', 'receiptNumber'] loop
-          fixed := public.nova_keep(fixed, prev, k);
-        end loop;
-      end if;
-      out_list := out_list || jsonb_build_array(fixed);
-    end loop;
-    for e in select value from jsonb_array_elements(o->'balanceRequests') loop
-      if (e ? 'id') and not (nmap ? (e->>'id')) and e->>'status' = 'PROCESSING' then
-        out_list := out_list || jsonb_build_array(e);
+        out_list := out_list || jsonb_build_array(prev);
       end if;
     end loop;
-    n := jsonb_set(n, '{balanceRequests}', out_list, true);
+    n := jsonb_set(n, '{honeypotEvents}', (
+      select coalesce(jsonb_agg(x order by i), '[]'::jsonb)
+        from jsonb_array_elements(head_list || out_list) with ordinality t(x, i) where i <= 150
+    ), true);
   end if;
 
   -- Something was put back: bump the version so every open browser re-downloads the real data.
@@ -1100,6 +1153,337 @@ begin
     execute format('create policy "nova_owner_write" on public.%I for all to authenticated using (public.nova_is_admin()) with check (public.nova_is_admin())', t);
   end loop;
 end $rls$;
+
+
+-- =====================================================================
+-- PART 10 · Private accounts (v36): server sign-in, private reads, Telegram, email codes
+-- =====================================================================
+
+-- ---------------------------------------------------------------------
+-- 10.1 Who is this browser? (session token → account id)
+-- ---------------------------------------------------------------------
+create or replace function public.nova_viewer(st jsonb, p_token text)
+returns text
+language plpgsql
+stable
+as $$
+declare
+  th text;
+  uid text;
+begin
+  if p_token is null or length(p_token) < 16 or length(p_token) > 200 or st is null then
+    return null;
+  end if;
+  th := encode(sha256(convert_to(p_token, 'UTF8')), 'hex');
+  select s->>'userId' into uid
+    from jsonb_array_elements(coalesce(st->'sessions', '[]'::jsonb)) s
+   where s->>'tokenHash' = th and (s->>'expiresAt')::timestamptz > now()
+   limit 1;
+  return uid;
+end;
+$$;
+
+create or replace function public.nova_viewer_is_owner(st jsonb, uid text)
+returns boolean
+language sql
+stable
+as $$
+  select uid is not null and exists (
+    select 1 from jsonb_array_elements(coalesce(st->'users', '[]'::jsonb)) x
+     where x->>'id' = uid and x->>'role' = 'ADMIN' and lower(coalesce(x->>'email', '')) = 'majd@elmadani.com'
+       and coalesce(x->>'isBlocked', 'false') <> 'true'
+  );
+$$;
+
+-- v36: the owner signed in with the store's normal admin sign-in (server-checked password) is trusted too.
+create or replace function public.nova_guard_status(p_token text)
+returns jsonb
+language plpgsql
+stable
+security definer
+set search_path = public
+as $$
+declare
+  st jsonb;
+begin
+  select payload into st from public.novacharge_state where id = 'primary';
+  return jsonb_build_object('guard', true, 'version', 36,
+    'admin', public.nova_is_admin() or public.nova_viewer_is_owner(st, public.nova_viewer(st, p_token)));
+end;
+$$;
+
+create or replace function public.nova_guard_status()
+returns jsonb
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select jsonb_build_object('guard', true, 'version', 36, 'admin', public.nova_is_admin());
+$$;
+
+-- ---------------------------------------------------------------------
+-- 10.2 Private reads: each browser gets the catalog + ONLY its own account data
+-- ---------------------------------------------------------------------
+create or replace function public.novacharge_read(p_token text default null, p_guest_key text default null)
+returns jsonb
+language plpgsql
+stable
+security definer
+set search_path = public
+as $$
+declare
+  st jsonb;
+  ver bigint;
+  uid text;
+  th text := '';
+  gk text := coalesce(p_guest_key, '');
+  res jsonb;
+  stats jsonb;
+begin
+  select payload, version into st, ver from public.novacharge_state where id = 'primary';
+  if st is null then
+    return null;
+  end if;
+  uid := public.nova_viewer(st, p_token);
+  if public.nova_trusted() or public.nova_viewer_is_owner(st, uid) then
+    return jsonb_build_object('version', ver, 'payload', st, 'redacted', false, 'viewer', uid);
+  end if;
+  uid := coalesce(uid, '');
+  if p_token is not null then
+    th := encode(sha256(convert_to(p_token, 'UTF8')), 'hex');
+  end if;
+  -- Average approval time of recent top-ups (the only public figure built from private rows).
+  select jsonb_build_object('averageMinutes', avg(m), 'sampleSize', count(*)) into stats
+    from (
+      select extract(epoch from ((x->>'resolvedAt')::timestamptz - (x->>'createdAt')::timestamptz)) / 60 as m
+        from jsonb_array_elements(coalesce(st->'balanceRequests', '[]'::jsonb)) with ordinality t(x, i)
+       where x->>'status' = 'APPROVED' and coalesce(x->>'resolvedAt', '') <> '' and coalesce(x->>'referenceNote', '') not like 'Admin credit%'
+       order by i
+       limit 20
+    ) z
+   where m >= 0 and m < 1440;
+  res := (st - array['users', 'sessions', 'orders', 'balanceRequests', 'transactions', 'supportTickets', 'honeypotEvents'])
+    || jsonb_build_object(
+      'users', (select coalesce(jsonb_agg(x - 'passwordHash' - 'passwordSalt' order by i), '[]'::jsonb)
+                  from jsonb_array_elements(coalesce(st->'users', '[]'::jsonb)) with ordinality t(x, i) where uid <> '' and x->>'id' = uid),
+      'sessions', (select coalesce(jsonb_agg(x order by i), '[]'::jsonb)
+                  from jsonb_array_elements(coalesce(st->'sessions', '[]'::jsonb)) with ordinality t(x, i) where th <> '' and x->>'tokenHash' = th),
+      'orders', (select coalesce(jsonb_agg(x order by i), '[]'::jsonb)
+                  from jsonb_array_elements(coalesce(st->'orders', '[]'::jsonb)) with ordinality t(x, i) where uid <> '' and x->>'userId' = uid),
+      'balanceRequests', (select coalesce(jsonb_agg(x order by i), '[]'::jsonb)
+                  from jsonb_array_elements(coalesce(st->'balanceRequests', '[]'::jsonb)) with ordinality t(x, i) where uid <> '' and x->>'userId' = uid),
+      'transactions', (select coalesce(jsonb_agg(x order by i), '[]'::jsonb)
+                  from jsonb_array_elements(coalesce(st->'transactions', '[]'::jsonb)) with ordinality t(x, i) where uid <> '' and x->>'userId' = uid),
+      'supportTickets', (select coalesce(jsonb_agg(x order by i), '[]'::jsonb)
+                  from jsonb_array_elements(coalesce(st->'supportTickets', '[]'::jsonb)) with ordinality t(x, i)
+                 where (uid <> '' and x->>'userId' = uid) or (gk <> '' and coalesce(x->>'guestKey', '') = gk)),
+      'honeypotEvents', '[]'::jsonb,
+      'topupStats', coalesce(stats, '{}'::jsonb)
+    );
+  return jsonb_build_object('version', ver, 'payload', res, 'redacted', true, 'viewer', nullif(uid, ''));
+end;
+$$;
+
+-- ---------------------------------------------------------------------
+-- 10.3 Saves carry the session token (the guard then knows whose records may change)
+-- ---------------------------------------------------------------------
+-- Adds a "merge" op (change a few fields of one record) used by the server sign-in.
+create or replace function public.novacharge_patch(ops jsonb)
+returns bigint
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  current_payload jsonb;
+  current_version bigint;
+  op jsonb;
+  k text;
+  idk text;
+  arr jsonb;
+  item jsonb;
+  present boolean;
+  next_version bigint;
+begin
+  if jsonb_typeof(ops) <> 'array' then
+    raise exception 'ops must be an array';
+  end if;
+  select payload, version into current_payload, current_version
+    from public.novacharge_state where id = 'primary' for update;
+  if current_payload is null then
+    raise exception 'store row missing';
+  end if;
+  for op in select value from jsonb_array_elements(ops) loop
+    k := op->>'key';
+    if k is null or k in ('version', 'updatedAt') then
+      continue;
+    end if;
+    if op->>'op' = 'set' then
+      current_payload := jsonb_set(current_payload, array[k], coalesce(op->'value', 'null'::jsonb), true);
+    elsif op->>'op' in ('upsert', 'delete', 'merge') then
+      idk := coalesce(op->>'idKey', 'id');
+      arr := coalesce(current_payload->k, '[]'::jsonb);
+      if jsonb_typeof(arr) <> 'array' then
+        arr := '[]'::jsonb;
+      end if;
+      if op->>'op' = 'delete' then
+        select coalesce(jsonb_agg(e order by ord), '[]'::jsonb) into arr
+          from jsonb_array_elements(arr) with ordinality t(e, ord)
+          where e->>idk is distinct from op->>'id';
+      elsif op->>'op' = 'merge' then
+        select coalesce(jsonb_agg(case when e->>idk = op->>'id' then e || coalesce(op->'value', '{}'::jsonb) else e end order by ord), '[]'::jsonb) into arr
+          from jsonb_array_elements(arr) with ordinality t(e, ord);
+      else
+        item := op->'value';
+        select exists(select 1 from jsonb_array_elements(arr) e where e->>idk = item->>idk) into present;
+        if present then
+          select jsonb_agg(case when e->>idk = item->>idk then item else e end order by ord) into arr
+            from jsonb_array_elements(arr) with ordinality t(e, ord);
+        elsif op->>'at' = 'start' then
+          arr := jsonb_build_array(item) || arr;
+        else
+          arr := arr || jsonb_build_array(item);
+        end if;
+      end if;
+      current_payload := jsonb_set(current_payload, array[k], arr, true);
+    end if;
+  end loop;
+  next_version := current_version + 1;
+  current_payload := current_payload || jsonb_build_object(
+    'version', next_version,
+    'updatedAt', to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+  );
+  update public.novacharge_state
+     set payload = current_payload, version = next_version, updated_at = now()
+   where id = 'primary';
+  return next_version;
+end;
+$$;
+grant execute on function public.novacharge_patch(jsonb) to anon, authenticated;
+
+create or replace function public.novacharge_patch_v2(ops jsonb, p_token text default null, p_guest_key text default null)
+returns bigint
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  st jsonb;
+  uid text;
+begin
+  select payload into st from public.novacharge_state where id = 'primary' for update;
+  uid := public.nova_viewer(st, p_token);
+  if uid is not null and exists (
+    select 1 from jsonb_array_elements(coalesce(st->'users', '[]'::jsonb)) x where x->>'id' = uid and coalesce(x->>'isBlocked', 'false') = 'true'
+  ) then
+    uid := null;
+  end if;
+  perform set_config('nova.viewer', coalesce(uid, ''), true);
+  perform set_config('nova.guest', left(coalesce(p_guest_key, ''), 200), true);
+  if public.nova_viewer_is_owner(st, uid) then
+    perform set_config('nova.trusted', 'on', true);
+  end if;
+  return public.novacharge_patch(ops);
+end;
+$$;
+grant execute on function public.novacharge_patch_v2(jsonb, text, text) to anon, authenticated;
+
+-- Whole-store saves / loads are for the owner and the server only now.
+create or replace function public.novacharge_action(action text, payload jsonb default '{}'::jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public
+as $fn$
+declare
+  incoming bigint;
+  row_data public.novacharge_state;
+begin
+  if action = 'load_state' then
+    if not public.nova_trusted() then
+      return public.novacharge_read(null, null);
+    end if;
+    select * into row_data from public.novacharge_state where id = 'primary';
+    if not found then
+      return null;
+    end if;
+    return jsonb_build_object('version', row_data.version, 'payload', row_data.payload);
+  elsif action = 'save_state' then
+    if not public.nova_trusted() then
+      raise exception 'ZC_FULL_SAVE_BLOCKED';
+    end if;
+    incoming := coalesce((payload->>'version')::bigint, 0);
+    insert into public.novacharge_state (id, version, payload, updated_at)
+    values ('primary', incoming, payload, now())
+    on conflict (id) do update
+      set version = excluded.version, payload = excluded.payload, updated_at = now()
+      where public.novacharge_state.version <= excluded.version;
+    return jsonb_build_object('ok', true, 'version', incoming);
+  end if;
+  raise exception 'novacharge_action: unknown action %', action;
+end;
+$fn$;
+grant execute on function public.novacharge_action(text, jsonb) to anon, authenticated;
+
+grant execute on function public.novacharge_read(text, text) to anon, authenticated;
+grant execute on function public.nova_guard_status(text) to anon, authenticated;
+
+-- ---------------------------------------------------------------------
+-- 10.4 Nobody can download the whole store any more
+-- ---------------------------------------------------------------------
+-- Browsers may still read the version counter (the tiny "anything new?" check); the data itself
+-- only comes through novacharge_read above.
+revoke select on public.novacharge_state from anon, authenticated;
+grant select (id, version, updated_at) on public.novacharge_state to anon, authenticated;
+
+-- The live row-change feed would carry the whole row: take the store out of it (the app uses a
+-- broadcast signal + a tiny version poll instead).
+do $rt$
+begin
+  alter publication supabase_realtime drop table public.novacharge_state;
+exception when others then
+  null;
+end $rt$;
+
+-- The old Storage fallback copy of the store is no longer public.
+do $st$
+begin
+  update storage.buckets set public = false where id = 'novacharge';
+  drop policy if exists "novacharge_storage_all" on storage.objects;
+exception when others then
+  null;
+end $st$;
+
+-- ---------------------------------------------------------------------
+-- 10.5 Telegram links and email codes (server only: RLS on, no policies, no grants)
+-- ---------------------------------------------------------------------
+create table if not exists public.telegram_links (
+  chat_id    text primary key,
+  user_id    text,
+  is_admin   boolean     not null default false,
+  tg_username text       not null default '',
+  tg_name    text        not null default '',
+  linked_at  timestamptz not null default now()
+);
+create index if not exists telegram_links_user_idx on public.telegram_links (user_id);
+create table if not exists public.telegram_codes (
+  code       text primary key,
+  user_id    text,
+  is_admin   boolean     not null default false,
+  expires_at timestamptz not null
+);
+create table if not exists public.email_codes (
+  ticket     text primary key,
+  email      text        not null,
+  attempts   integer     not null default 0,
+  created_at timestamptz not null default now()
+);
+create index if not exists email_codes_email_idx on public.email_codes (email, created_at desc);
+alter table public.telegram_links enable row level security;
+alter table public.telegram_codes enable row level security;
+alter table public.email_codes enable row level security;
+revoke all on public.telegram_links, public.telegram_codes, public.email_codes from anon, authenticated;
 
 notify pgrst, 'reload schema';
 `;

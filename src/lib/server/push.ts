@@ -62,11 +62,22 @@ export async function sendToUsers(userIds: string[], payload: PushPayload): Prom
   return { sent, removed: dead.length };
 }
 
-/* ------------------------------ v35: Telegram bot alerts (work with every browser closed) ------------------------------ */
+/* ------------------------------ v35/v36: Telegram bot (every customer + up to 3 admins) ------------------------------ */
 
-/** True once TELEGRAM_BOT_TOKEN and TELEGRAM_ADMIN_CHAT_ID are set on the server (never sent to browsers). */
+/** True once TELEGRAM_BOT_TOKEN is set on the server (never sent to browsers). */
 export function telegramConfigured(): boolean {
-  return Boolean(process.env.TELEGRAM_BOT_TOKEN?.trim() && process.env.TELEGRAM_ADMIN_CHAT_ID?.trim());
+  return Boolean(process.env.TELEGRAM_BOT_TOKEN?.trim());
+}
+
+export function telegramBotUsername(): string {
+  return (process.env.TELEGRAM_BOT_USERNAME ?? "").trim().replace(/^@/, "");
+}
+
+/** Secret Telegram sends back on every webhook call (derived from the bot token, never public). */
+export async function telegramWebhookSecret(): Promise<string> {
+  const token = process.env.TELEGRAM_BOT_TOKEN?.trim() ?? "";
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`zova-tg-webhook|${token}`));
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("").slice(0, 48);
 }
 
 /** Escapes text for Telegram's HTML mode. */
@@ -77,22 +88,51 @@ export function tgEscape(value: unknown): string {
     .replace(/>/g, "&gt;");
 }
 
-/** Sends one message to the admin chat. Never throws; false when not configured or Telegram refused. */
-export async function sendTelegram(html: string): Promise<boolean> {
+/** Calls one Bot API method. Never throws. */
+export async function telegramApi(method: string, payload: Record<string, unknown>): Promise<{ ok: boolean; result?: unknown; description?: string }> {
   const token = process.env.TELEGRAM_BOT_TOKEN?.trim();
-  const chatId = process.env.TELEGRAM_ADMIN_CHAT_ID?.trim();
-  if (!token || !chatId) return false;
+  if (!token) return { ok: false, description: "TELEGRAM_BOT_TOKEN is not set." };
   try {
-    const response = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+    const response = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ chat_id: chatId, text: html.slice(0, 4000), parse_mode: "HTML", disable_web_page_preview: true }),
-      signal: AbortSignal.timeout(7000),
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(8000),
     });
-    return response.ok;
+    return (await response.json().catch(() => ({ ok: false }))) as { ok: boolean; result?: unknown; description?: string };
   } catch {
-    return false;
+    return { ok: false, description: "Telegram could not be reached." };
   }
+}
+
+/** Sends the message to each chat. Returns how many accepted it. */
+export async function sendTelegram(html: string, chatIds: string[]): Promise<number> {
+  const unique = [...new Set(chatIds.filter(Boolean))];
+  const results = await Promise.all(
+    unique.map((chatId) => telegramApi("sendMessage", { chat_id: chatId, text: html.slice(0, 4000), parse_mode: "HTML", disable_web_page_preview: true })),
+  );
+  return results.filter((result) => result.ok).length;
+}
+
+/** Chats linked as admins (max 3) + the optional TELEGRAM_ADMIN_CHAT_ID from v35. */
+export async function adminChatIds(): Promise<string[]> {
+  const supabase = adminClient();
+  const ids: string[] = [];
+  if (supabase) {
+    const { data } = await supabase.from("telegram_links").select("chat_id").eq("is_admin", true).limit(3);
+    for (const row of (data ?? []) as Array<{ chat_id: string }>) ids.push(row.chat_id);
+  }
+  const legacy = process.env.TELEGRAM_ADMIN_CHAT_ID?.trim();
+  if (legacy) ids.push(legacy);
+  return [...new Set(ids)];
+}
+
+/** Chats a customer linked to their own account. */
+export async function userChatIds(userId: string): Promise<string[]> {
+  const supabase = adminClient();
+  if (!supabase || !userId) return [];
+  const { data } = await supabase.from("telegram_links").select("chat_id").eq("user_id", userId).limit(5);
+  return ((data ?? []) as Array<{ chat_id: string }>).map((row) => row.chat_id);
 }
 
 /** Once per event for Telegram. Only an existing record (unique violation) means "already sent". */

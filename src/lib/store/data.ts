@@ -106,6 +106,8 @@ export type StoredUser = {
   lastChargeAt?: number;
   /** v27 sign-in security: wrong passwords in a row (3 → locked) and successful sign-ins per day. */
   failedLoginAttempts?: number;
+  /** v36: time of the last wrong password (owner pause after 5 in a row). */
+  lastFailedLoginAt?: string;
   isLocked?: boolean;
   dailyLoginCount?: number;
   /** YYYY-MM-DD (Damascus time) of the last successful sign-in. */
@@ -249,6 +251,8 @@ export type NovaState = {
   heroBanners?: string[];
   /** v33: decoy admin-URL visits (newest first, capped). */
   honeypotEvents?: HoneypotEvent[];
+  /** v36: public approval-time figure the server adds to a private (own-data-only) read. */
+  topupStats?: { averageMinutes: number | null; sampleSize: number };
 };
 
 const SEEDED_AT = "2026-01-15T00:00:00.000Z";
@@ -911,6 +915,9 @@ export function normalizeState(input: unknown): NovaState | null {
     sypRate: typeof raw.sypRate === "number" && raw.sypRate > 0 ? raw.sypRate : DEFAULT_SYP_RATE_VALUE,
     avgTopupMinutes: typeof raw.avgTopupMinutes === "number" && raw.avgTopupMinutes > 0 ? raw.avgTopupMinutes : 3,
     deletedSlugs: asArray<string>(raw.deletedSlugs).filter((slug) => typeof slug === "string"),
+    ...(raw.topupStats && typeof raw.topupStats === "object"
+      ? { topupStats: { averageMinutes: typeof raw.topupStats.averageMinutes === "number" ? raw.topupStats.averageMinutes : null, sampleSize: Number(raw.topupStats.sampleSize) || 0 } }
+      : {}),
     offersTickerText:
       typeof raw.offersTickerText === "string" && raw.offersTickerText.trim() ? raw.offersTickerText : DEFAULT_TICKER_EN,
     offersTickerTextAr:

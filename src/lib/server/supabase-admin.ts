@@ -142,14 +142,77 @@ export async function ownerFromBearer(request: Request, state?: NovaState | null
   return user ?? null;
 }
 
-let guardCache: { at: number; installed: boolean } | null = null;
+let guardCache: { at: number; version: number } | null = null;
 
-/** Whether SQL part 9 (money guard) is installed — cached for a minute. */
-export async function guardInstalled(): Promise<boolean> {
-  if (guardCache && Date.now() - guardCache.at < 60_000) return guardCache.installed;
+/** Installed SQL guard version: 0 = none, 35 = part 9, 36 = part 10 (cached for a minute). */
+export async function guardVersion(): Promise<number> {
+  if (guardCache && Date.now() - guardCache.at < 60_000) return guardCache.version;
   const supabase = adminClient();
-  if (!supabase) return false;
-  const { error } = await supabase.rpc("nova_guard_status");
-  guardCache = { at: Date.now(), installed: !error };
-  return guardCache.installed;
+  if (!supabase) return 0;
+  const { data, error } = await supabase.rpc("nova_guard_status");
+  const version = error ? 0 : Number((data as { version?: number } | null)?.version ?? 35) || 35;
+  guardCache = { at: Date.now(), version };
+  return version;
+}
+
+/** Whether SQL part 9 (money guard) is installed. */
+export async function guardInstalled(): Promise<boolean> {
+  return (await guardVersion()) >= 35;
+}
+
+/**
+ * The owner, from either the Supabase owner session (Bearer) or — once SQL part 10 makes sessions
+ * server-only (unforgeable) — the store's own admin session token.
+ */
+export async function ownerFromRequest(request: Request, state: NovaState | null, token: unknown) {
+  if (!state) return null;
+  const bearer = await ownerFromBearer(request, state);
+  if (bearer) return bearer;
+  if ((await guardVersion()) < 36) return null;
+  const user = await userFromToken(state, token ?? request.headers.get("x-zova-token"));
+  return user && user.role === "ADMIN" && user.email.toLowerCase() === OWNER_EMAIL ? user : null;
+}
+
+/* ------------------------------ v36: server-side store writes & sign-in helpers ------------------------------ */
+
+export type ServerPatchOp =
+  | { op: "upsert"; key: string; idKey: "id"; value: Record<string, unknown>; at?: "start" | "end" }
+  | { op: "merge"; key: string; idKey: "id"; id: string; value: Record<string, unknown> }
+  | { op: "delete"; key: string; idKey: "id"; id: string };
+
+/** Change-only save with the service-role key (trusted by the SQL guard). */
+export async function serverPatch(ops: ServerPatchOp[]): Promise<{ ok: true } | { ok: false; error: string }> {
+  const supabase = adminClient();
+  if (!supabase) return { ok: false, error: "SUPABASE_SERVICE_ROLE_KEY is not set on the server." };
+  if (!ops.length) return { ok: true };
+  const { error } = await supabase.rpc("novacharge_patch", { ops });
+  return error ? { ok: false, error: error.message } : { ok: true };
+}
+
+export function randomHex(bytes: number): string {
+  return Array.from(crypto.getRandomValues(new Uint8Array(bytes)), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+export { sha256Hex };
+
+/** Same PBKDF2-SHA256 (100 000 rounds) the shop has always used, so existing passwords keep working. */
+export async function hashPasswordServer(password: string, saltHex?: string): Promise<{ passwordHash: string; passwordSalt: string }> {
+  const salt = saltHex ? Uint8Array.from(saltHex.match(/.{2}/g) ?? [], (pair) => Number.parseInt(pair, 16)) : crypto.getRandomValues(new Uint8Array(16));
+  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(password), "PBKDF2", false, ["deriveBits"]);
+  const bits = await crypto.subtle.deriveBits({ name: "PBKDF2", salt: salt.buffer.slice(0) as ArrayBuffer, iterations: 100_000, hash: "SHA-256" }, key, 256);
+  const hash = Array.from(new Uint8Array(bits), (byte) => byte.toString(16).padStart(2, "0")).join("");
+  return { passwordHash: hash, passwordSalt: saltHex ?? Array.from(salt, (byte) => byte.toString(16).padStart(2, "0")).join("") };
+}
+
+export function sameText(left: string, right: string): boolean {
+  if (left.length !== right.length) return false;
+  let diff = 0;
+  for (let index = 0; index < left.length; index += 1) diff |= left.charCodeAt(index) ^ right.charCodeAt(index);
+  return diff === 0;
+}
+
+/** Real visitor IP + country from Vercel's edge headers. */
+export function requestOrigin(request: Request): { ip: string; country: string } {
+  const header = request.headers.get("x-vercel-forwarded-for") ?? request.headers.get("x-forwarded-for") ?? request.headers.get("x-real-ip") ?? "";
+  return { ip: header.split(",")[0]?.trim().slice(0, 64) ?? "", country: (request.headers.get("x-vercel-ip-country") ?? "").slice(0, 4) };
 }

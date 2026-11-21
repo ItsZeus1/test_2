@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-import { VAULT_COLUMNS, VAULT_LEGACY_COLUMNS, adminClient, loadServerState, ownerFromBearer, vaultNeedsUpgrade } from "@/lib/server/supabase-admin";
+import { VAULT_COLUMNS, VAULT_LEGACY_COLUMNS, adminClient, loadServerState, ownerFromRequest, vaultNeedsUpgrade } from "@/lib/server/supabase-admin";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -8,23 +8,24 @@ export const dynamic = "force-dynamic";
 const NO_STORE = { "Cache-Control": "no-store, max-age=0", "X-Robots-Tag": "noindex" };
 
 /**
- * v35 · Admin-only JSON backup. Requires `Authorization: Bearer <Supabase access token>` of the
- * owner's confirmed Supabase session (checked by Supabase on the server) AND the ADMIN role in the store.
+ * v35/v36 · Admin-only JSON backup. Requires the owner: `Authorization: Bearer <Supabase access token>`
+ * of the confirmed owner account, or (after SQL part 10) the owner's server-made store session in
+ * `x-zova-token`. Both are checked on the server, together with the ADMIN role in the store.
  * Everyone else gets 401 / 403. Password hashes, sessions, provider API secrets and tokens are
  * never included.
  */
 export async function GET(request: Request) {
-  if (!/^Bearer\s+\S+$/i.test(request.headers.get("authorization") ?? "")) {
+  if (!/^Bearer\s+\S+$/i.test(request.headers.get("authorization") ?? "") && !request.headers.get("x-zova-token")) {
     return NextResponse.json({ ok: false, error: "Sign-in required." }, { status: 401, headers: NO_STORE });
   }
   const supabase = adminClient();
   if (!supabase) return NextResponse.json({ ok: false, error: "SUPABASE_SERVICE_ROLE_KEY is not set on the server." }, { status: 503, headers: NO_STORE });
   const state = await loadServerState();
   if (!state) return NextResponse.json({ ok: false, error: "Store unavailable." }, { status: 503, headers: NO_STORE });
-  const owner = await ownerFromBearer(request, state);
+  const owner = await ownerFromRequest(request, state, null);
   if (!owner) {
     return NextResponse.json(
-      { ok: false, error: "🔐 للمالك فقط: فعّل جلسة المالك الآمنة من الإعدادات · Owner only: turn on the owner secure session in Settings." },
+      { ok: false, error: "🔐 للمالك فقط: سجّل الدخول كمدير مجدداً · Owner only: sign in again as the admin." },
       { status: 403, headers: NO_STORE },
     );
   }

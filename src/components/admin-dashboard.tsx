@@ -50,6 +50,8 @@ import {
   getGuardState,
   refreshGuardStatus,
   activateOwnerSession,
+  adminTelegram,
+  type TelegramAdminChat,
 } from "@/lib/store/api";
 import { DEFAULT_SYP_RATE } from "@/lib/money";
 import type { StoredBalanceRequest } from "@/lib/store/data";
@@ -725,6 +727,7 @@ export function AdminDashboard() {
       {tab === "settings" ? (
         <>
           <OwnerSecurityCard />
+          <TelegramAdminCard />
           <section className="admin-box mt-6 rounded-[22px] p-4">
             <h2 className="inline-flex items-center gap-2 font-display text-base font-extrabold sm:text-lg">
               <ShieldCheck className="size-5 text-sky-600" strokeWidth={1.75} />
@@ -945,7 +948,7 @@ function OwnerSessionChip() {
   const on = state === "trusted";
   const label =
     state === "absent"
-      ? ar ? "الحماية المالية: شغّل SQL الجزء 9" : "Money guard: run SQL part 9"
+      ? ar ? "الحماية: شغّل SQL v36" : "Protection: run SQL v36"
       : on
         ? ar ? "🔐 جلسة المالك الآمنة: مفعّلة" : "🔐 Owner secure session: on"
         : ar ? "🔐 جلسة المالك الآمنة: غير مفعّلة" : "🔐 Owner secure session: off";
@@ -1009,8 +1012,8 @@ function OwnerSecurityCard() {
       </div>
       <p className="mt-1 text-sm text-muted">
         {ar
-          ? "بعد تشغيل SQL الجزء 9: الشراء يتم على الخادم بعملية واحدة مقفلة (لا خصم مرتين ولا تلاعب بالسعر)، ولا يقبل المتجر تغيير الأرصدة أو الأسعار أو الموافقات إلا من «جلسة المالك الآمنة». تُفتح تلقائياً عند دخولك كمدير بالبريد وكلمة المرور."
-          : "After SQL part 9: purchases run on the server in one locked transaction (no double spend, no price tampering), and balances, prices and approvals only change from the owner's secure session. It opens by itself when you sign in as admin with email and password."}
+          ? "بعد تشغيل SQL v36: تسجيل الدخول والشراء يتمّان على الخادم (لا خصم مرتين ولا تلاعب بالسعر ولا جلسات مزوّرة)، ولا يرى أي متصفح إلا بيانات حسابه، ولا تتغيّر الأرصدة أو الأسعار أو الموافقات إلا من جلستك كمدير — تُفعَّل تلقائياً عند دخولك العادي كمدير."
+          : "After SQL v36: sign-in and purchases run on the server (no double spend, no price tampering, no faked sessions), each browser only sees its own account, and balances, prices and approvals only change from your admin session — on automatically when you sign in as admin."}
       </p>
       <div className="mt-3 grid gap-2 sm:grid-cols-3">
         <button
@@ -1018,7 +1021,7 @@ function OwnerSecurityCard() {
           onClick={() => void navigator.clipboard.writeText(NOVACHARGE_SECURITY_SQL).then(() => toast.success(ar ? "تم النسخ — الصقه في Supabase → SQL Editor" : "Copied — paste it in Supabase → SQL Editor"))}
           className="min-h-11 rounded-[14px] border border-slate-300 px-4 text-xs font-bold dark:border-white/15"
         >
-          {ar ? "نسخ SQL الجزء 9 (الحماية المالية)" : "Copy SQL part 9 (money protection)"}
+          {ar ? "نسخ SQL v36 (الحماية + الخصوصية)" : "Copy SQL v36 (protection + privacy)"}
         </button>
         {state === "untrusted" ? (
           <form
@@ -1065,9 +1068,142 @@ function OwnerSecurityCard() {
       {!on ? (
         <p className="mt-2 text-[11px] text-muted">
           {ar
-            ? "إعداد لمرة واحدة: Supabase ← Authentication ← Users ← Add user ← majd@elmadani.com بنفس كلمة مرور المدير، مع تفعيل «Auto Confirm User». بعدها تُفتح الجلسة الآمنة تلقائياً عند كل دخول. النسخة الاحتياطية لا تحتوي كلمات المرور أو الجلسات أو مفاتيح المزودين."
-            : "One-time setup: Supabase → Authentication → Users → Add user → majd@elmadani.com with the same password as the store admin, tick “Auto Confirm User”. After that the secure session opens by itself at every sign-in. The backup never includes passwords, sessions or provider keys."}
+            ? "إن بقيت «غير مفعّلة» بعد تشغيل SQL v36: سجّل الخروج ثم ادخل مجدداً كمدير. النسخة الاحتياطية لا تحتوي كلمات المرور أو الجلسات أو مفاتيح المزودين."
+            : "Still “off” after running SQL v36? Sign out and sign in again as the admin. The backup never includes passwords, sessions or provider keys."}
         </p>
+      ) : null}
+    </section>
+  );
+}
+
+/* ------------------------------ v36: Telegram (admin chats, max 3) ------------------------------ */
+
+function TelegramAdminCard() {
+  const { language } = useI18n();
+  const ar = language === "ar";
+  const [admins, setAdmins] = useState<TelegramAdminChat[]>([]);
+  const [max, setMax] = useState(3);
+  const [bot, setBot] = useState("");
+  const [state, setState] = useState<"loading" | "ready" | "off" | "sql" | "error">("loading");
+  const [note, setNote] = useState("");
+  const [invite, setInvite] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const load = useCallback(async () => {
+    const reply = await adminTelegram("list");
+    if (reply.configured === false) return setState("off");
+    if (reply.needsSql) return setState("sql");
+    if (!reply.ok) {
+      setNote(reply.error ?? "");
+      return setState("error");
+    }
+    setAdmins(reply.admins ?? []);
+    setMax(reply.max ?? 3);
+    setBot(reply.bot ?? "");
+    setState("ready");
+  }, []);
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  async function run(op: "setup" | "link" | "remove", chatId?: string) {
+    setBusy(true);
+    try {
+      const reply = await adminTelegram(op, chatId);
+      if (!reply.ok) return toast.error(reply.error ?? (ar ? "تعذّر التنفيذ" : "Failed"));
+      if (op === "setup") toast.success(ar ? "تم ربط البوت بالموقع ✓" : "Bot connected ✓");
+      if (op === "link" && reply.url) setInvite(reply.url);
+      if (op === "remove") toast.success(ar ? "تم حذف المدير من تيليغرام" : "Admin chat removed");
+      await load();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section className="admin-box mt-6 rounded-[22px] p-4" aria-labelledby="tg-admin-title">
+      <h2 id="tg-admin-title" className="inline-flex items-center gap-2 font-display text-base font-extrabold sm:text-lg">
+        <MessagesSquare className="size-5 text-sky-600" strokeWidth={1.75} />
+        {ar ? "تنبيهات تيليغرام" : "Telegram alerts"}
+        {state === "ready" ? (
+          <span className="rounded-full bg-sky-500/10 px-2 py-0.5 text-[11px] font-bold text-sky-700 tabular-nums dark:text-sky-300">
+            {admins.length}/{max} {ar ? "مدراء" : "admins"}
+          </span>
+        ) : null}
+      </h2>
+      <p className="mt-1 text-sm text-muted">
+        {ar
+          ? "بوت واحد للجميع: كل زبون يربط حسابه من القائمة ويستقبل تنبيهاته فقط، وحتى 3 حسابات تيليغرام تستقبل تنبيهات الإدارة (الشحن، الطلبات اليدوية، الدعم، المخزون، محاولات الاختراق)."
+          : "One bot for everyone: each customer links their account from the menu and only gets their own alerts; up to 3 Telegram accounts get the admin alerts (top-ups, manual orders, support, stock, intrusions)."}
+      </p>
+      {state === "off" ? (
+        <p className="mt-3 rounded-[14px] bg-amber-500/10 px-3 py-2 text-xs font-semibold text-amber-800 dark:text-amber-200">
+          {ar
+            ? "أضف في Vercel: TELEGRAM_BOT_TOKEN و TELEGRAM_BOT_USERNAME (من @BotFather) ثم أعد النشر."
+            : "Add TELEGRAM_BOT_TOKEN and TELEGRAM_BOT_USERNAME (from @BotFather) in Vercel, then redeploy."}
+        </p>
+      ) : null}
+      {state === "sql" ? (
+        <p className="mt-3 rounded-[14px] bg-amber-500/10 px-3 py-2 text-xs font-semibold text-amber-800 dark:text-amber-200">
+          {ar ? "شغّل supabase_v36_security.sql في Supabase أولاً." : "Run supabase_v36_security.sql in Supabase first."}
+        </p>
+      ) : null}
+      {state === "error" && note ? <p className="mt-3 text-xs font-semibold text-rose-600 dark:text-rose-300">{note}</p> : null}
+      {state === "ready" ? (
+        <>
+          <div className="mt-3 grid gap-2 sm:grid-cols-2">
+            <button type="button" disabled={busy} onClick={() => void run("setup")} className="min-h-11 rounded-[14px] border border-slate-300 px-4 text-xs font-bold disabled:opacity-60 dark:border-white/15">
+              {ar ? `ربط البوت بالموقع${bot ? ` (@${bot})` : ""}` : `Connect the bot${bot ? ` (@${bot})` : ""}`}
+            </button>
+            <button
+              type="button"
+              disabled={busy || admins.length >= max}
+              onClick={() => void run("link")}
+              className="btn-glow keep-white min-h-11 rounded-[14px] px-4 text-xs font-extrabold text-white disabled:opacity-60"
+            >
+              {ar ? "إنشاء رابط مدير جديد" : "Create an admin link"}
+            </button>
+          </div>
+          {invite ? (
+            <div className="mt-2 rounded-[14px] bg-sky-500/10 p-2.5 text-xs">
+              <p className="font-semibold">{ar ? "أرسل هذا الرابط للمدير (يعمل مرة واحدة خلال 30 دقيقة):" : "Send this link to the admin (one use, 30 minutes):"}</p>
+              <div className="mt-1.5 flex gap-1.5">
+                <code dir="ltr" className="min-w-0 flex-1 truncate rounded-[10px] bg-white px-2 py-2 dark:bg-[#0e131f]">
+                  {invite}
+                </code>
+                <button
+                  type="button"
+                  onClick={() => void navigator.clipboard.writeText(invite).then(() => toast.success(ar ? "تم النسخ" : "Copied"))}
+                  className="min-h-10 shrink-0 rounded-[10px] border border-slate-300 px-3 font-bold dark:border-white/15"
+                >
+                  {ar ? "نسخ" : "Copy"}
+                </button>
+              </div>
+            </div>
+          ) : null}
+          <ul className="mt-3 grid gap-1.5">
+            {admins.length === 0 ? <li className="text-xs text-muted">{ar ? "لا يوجد مدراء مرتبطون بعد." : "No admin chats linked yet."}</li> : null}
+            {admins.map((chat) => (
+              <li key={chat.chat_id} className="flex min-h-12 items-center gap-2 rounded-[14px] border border-slate-200 px-3 dark:border-white/10">
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-sm font-semibold">{chat.tg_name || (ar ? "مدير" : "Admin")}</span>
+                  <span className="block truncate text-[11px] text-muted" dir="ltr">
+                    {chat.tg_username ? `@${chat.tg_username}` : chat.chat_id}
+                  </span>
+                </span>
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => void run("remove", chat.chat_id)}
+                  aria-label={ar ? `حذف ${chat.tg_name || chat.chat_id}` : `Remove ${chat.tg_name || chat.chat_id}`}
+                  className="grid size-10 place-items-center rounded-[10px] border border-rose-400/40 text-rose-500 disabled:opacity-50"
+                >
+                  <Trash2 className="size-4" />
+                </button>
+              </li>
+            ))}
+          </ul>
+        </>
       ) : null}
     </section>
   );

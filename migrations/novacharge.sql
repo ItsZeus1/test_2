@@ -404,8 +404,8 @@ revoke execute on function public.claim_vault_item_v2(text, text, text, text, te
 notify pgrst, 'reload schema';
 
 -- =====================================================================
--- PART 9 · Money protection (v35)
+-- PARTS 9 + 10 · Money protection (v35) + private accounts (v36)
 -- =====================================================================
--- Atomic purchases (purchase_service_atomic), the money guard trigger and tighter row level
--- security live in supabase_v35_security.sql at the project root (also copyable from
--- /admin → Settings → "Copy SQL part 9"). Run it after parts 1–8, and again after re-running part 1.
+-- Atomic purchases, the save guard, server-only sign-in sessions, private reads and the
+-- Telegram / email-code tables live in supabase_v36_security.sql at the project root (also
+-- copyable from /admin → Settings). Run it after parts 1–8, and again after re-running part 1.
