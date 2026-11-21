@@ -49,7 +49,7 @@ import {
   downloadAdminBackup,
   getGuardState,
   refreshGuardStatus,
-  startOwnerSecureSession,
+  activateOwnerSession,
 } from "@/lib/store/api";
 import { DEFAULT_SYP_RATE } from "@/lib/money";
 import type { StoredBalanceRequest } from "@/lib/store/data";
@@ -957,6 +957,23 @@ function OwnerSecurityCard() {
   const ar = language === "ar";
   const [state, refresh] = useGuardState();
   const [busy, setBusy] = useState(false);
+  const [password, setPassword] = useState("");
+
+  async function activate() {
+    setBusy(true);
+    try {
+      const result = await activateOwnerSession(password);
+      if (!result.ok) {
+        toast.error(result.error);
+        return;
+      }
+      setPassword("");
+      refresh();
+      toast.success(ar ? "🔐 تم تفعيل جلسة المالك الآمنة" : "🔐 Owner secure session is on");
+    } finally {
+      setBusy(false);
+    }
+  }
 
   async function backup() {
     setBusy(true);
@@ -992,8 +1009,8 @@ function OwnerSecurityCard() {
       </div>
       <p className="mt-1 text-sm text-muted">
         {ar
-          ? "بعد تشغيل SQL الجزء 9: الشراء يتم على الخادم بعملية واحدة مقفلة (لا خصم مرتين ولا تلاعب بالسعر)، ولا يقبل المتجر تغيير الأرصدة أو الأسعار أو الموافقات إلا من «جلسة المالك الآمنة» — أي بعد الدخول بحساب Google الخاص بالمدير."
-          : "After SQL part 9: purchases run on the server in one locked transaction (no double spend, no price tampering), and balances, prices and approvals only change from the owner's secure session — i.e. after signing in with the owner's Google account."}
+          ? "بعد تشغيل SQL الجزء 9: الشراء يتم على الخادم بعملية واحدة مقفلة (لا خصم مرتين ولا تلاعب بالسعر)، ولا يقبل المتجر تغيير الأرصدة أو الأسعار أو الموافقات إلا من «جلسة المالك الآمنة». تُفتح تلقائياً عند دخولك كمدير بالبريد وكلمة المرور."
+          : "After SQL part 9: purchases run on the server in one locked transaction (no double spend, no price tampering), and balances, prices and approvals only change from the owner's secure session. It opens by itself when you sign in as admin with email and password."}
       </p>
       <div className="mt-3 grid gap-2 sm:grid-cols-3">
         <button
@@ -1004,13 +1021,32 @@ function OwnerSecurityCard() {
           {ar ? "نسخ SQL الجزء 9 (الحماية المالية)" : "Copy SQL part 9 (money protection)"}
         </button>
         {state === "untrusted" ? (
-          <button
-            type="button"
-            onClick={() => void startOwnerSecureSession().then((result) => !result.ok && toast.error(result.error))}
-            className="min-h-11 rounded-[14px] border border-sky-500/50 bg-sky-500/10 px-4 text-xs font-bold text-sky-800 dark:text-sky-200"
+          <form
+            className="flex gap-1.5"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void activate();
+            }}
           >
-            {ar ? "تفعيل الجلسة الآمنة عبر Google" : "Start secure session with Google"}
-          </button>
+            <label className="min-w-0 flex-1">
+              <span className="sr-only">{ar ? "كلمة مرور المدير" : "Admin password"}</span>
+              <input
+                type="password"
+                autoComplete="current-password"
+                className="field min-h-11 py-2"
+                value={password}
+                onChange={(event) => setPassword(event.target.value)}
+                placeholder={ar ? "كلمة مرور المدير" : "Admin password"}
+              />
+            </label>
+            <button
+              type="submit"
+              disabled={busy || !password}
+              className="min-h-11 shrink-0 rounded-[14px] border border-sky-500/50 bg-sky-500/10 px-3 text-xs font-bold text-sky-800 disabled:opacity-60 dark:text-sky-200"
+            >
+              {ar ? "تفعيل الجلسة الآمنة" : "Turn on secure session"}
+            </button>
+          </form>
         ) : (
           <button type="button" onClick={refresh} className="min-h-11 rounded-[14px] border border-slate-300 px-4 text-xs font-bold dark:border-white/15">
             {ar ? "إعادة فحص الحالة" : "Check again"}
@@ -1029,8 +1065,8 @@ function OwnerSecurityCard() {
       {!on ? (
         <p className="mt-2 text-[11px] text-muted">
           {ar
-            ? "النسخة الاحتياطية تحتاج جلسة المالك الآمنة (الدخول بـ Google). لا تحتوي كلمات المرور أو الجلسات أو مفاتيح المزودين."
-            : "The backup needs the owner's secure session (Google sign-in). It never includes passwords, sessions or provider keys."}
+            ? "إعداد لمرة واحدة: Supabase ← Authentication ← Users ← Add user ← majd@elmadani.com بنفس كلمة مرور المدير، مع تفعيل «Auto Confirm User». بعدها تُفتح الجلسة الآمنة تلقائياً عند كل دخول. النسخة الاحتياطية لا تحتوي كلمات المرور أو الجلسات أو مفاتيح المزودين."
+            : "One-time setup: Supabase → Authentication → Users → Add user → majd@elmadani.com with the same password as the store admin, tick “Auto Confirm User”. After that the secure session opens by itself at every sign-in. The backup never includes passwords, sessions or provider keys."}
         </p>
       ) : null}
     </section>

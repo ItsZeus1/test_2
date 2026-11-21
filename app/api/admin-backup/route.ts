@@ -9,7 +9,7 @@ const NO_STORE = { "Cache-Control": "no-store, max-age=0", "X-Robots-Tag": "noin
 
 /**
  * v35 · Admin-only JSON backup. Requires `Authorization: Bearer <Supabase access token>` of the
- * owner's Google session (checked by Supabase on the server) AND the ADMIN role in the store.
+ * owner's confirmed Supabase session (checked by Supabase on the server) AND the ADMIN role in the store.
  * Everyone else gets 401 / 403. Password hashes, sessions, provider API secrets and tokens are
  * never included.
  */
@@ -24,7 +24,7 @@ export async function GET(request: Request) {
   const owner = await ownerFromBearer(request, state);
   if (!owner) {
     return NextResponse.json(
-      { ok: false, error: "🔐 للمالك فقط: ادخل بحساب Google الخاص بالمدير · Owner only: sign in with the owner's Google account." },
+      { ok: false, error: "🔐 للمالك فقط: فعّل جلسة المالك الآمنة من الإعدادات · Owner only: turn on the owner secure session in Settings." },
       { status: 403, headers: NO_STORE },
     );
   }

@@ -414,7 +414,7 @@ export const NOVACHARGE_SECURITY_SQL = `-- =====================================
 --      (FOR UPDATE SKIP LOCKED), charges, records the order and the ledger line. The same order
 --      id can never charge twice, and two clicks at once are serialised by the row lock.
 --   2. nova_money_guard trigger      every save that does not come from the verified owner
---      (Google sign-in as majd@elmadani.com), the server key or the SQL editor is checked:
+--      (the confirmed Supabase account majd@elmadani.com), the server key or the SQL editor is checked:
 --      balances, roles, locks, prices, payment addresses, approvals and the ledger are put back
 --      to their saved values, and new orders can only be created by purchase_service_atomic.
 --   3. Row level security             the public key can no longer write or delete the store
@@ -427,8 +427,10 @@ export const NOVACHARGE_SECURITY_SQL = `-- =====================================
 -- ---------------------------------------------------------------------
 -- 0) Who is asking?
 -- ---------------------------------------------------------------------
--- The request's JWT is signed by Supabase, so its claims can be trusted. The owner must use
--- the owner email AND a Google (OAuth) session; a password sign-up can never pass.
+-- The request's JWT is signed by Supabase, so its claims can be trusted. The owner is the
+-- confirmed Supabase Auth account majd@elmadani.com (email + password, signed in by the store's
+-- normal admin sign-in). One-time setup: Supabase → Authentication → Users → Add user →
+-- majd@elmadani.com with the SAME password as the store admin, tick "Auto Confirm User".
 create or replace function public.nova_claims()
 returns jsonb
 language plpgsql
@@ -451,7 +453,6 @@ set search_path = public
 as $$
 declare
   claims jsonb := public.nova_claims();
-  amr jsonb;
 begin
   if claims is null then
     return false;
@@ -462,13 +463,15 @@ begin
   if lower(coalesce(claims->>'email', '')) <> 'majd@elmadani.com' then
     return false;
   end if;
-  if coalesce(claims->'app_metadata'->>'provider', '') = 'google' then
-    return true;
-  end if;
-  amr := claims->'amr';
-  if jsonb_typeof(amr) = 'array' then
-    return exists (select 1 from jsonb_array_elements(amr) a where jsonb_typeof(a) = 'object' and a->>'method' = 'oauth');
-  end if;
+  -- The Supabase Auth account behind this token must be the owner's and its email confirmed.
+  -- With "Confirm email" on, nobody else can ever confirm that address.
+  return exists (
+    select 1 from auth.users u
+     where u.id::text = coalesce(claims->>'sub', '')
+       and lower(u.email) = 'majd@elmadani.com'
+       and u.email_confirmed_at is not null
+  );
+exception when others then
   return false;
 end;
 $$;

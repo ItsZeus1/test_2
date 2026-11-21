@@ -124,20 +124,10 @@ export function vaultPiece(row: Record<string, unknown>): VaultPieceOut {
 
 const OWNER_EMAIL = "majd@elmadani.com";
 
-/** Claims of a JWT whose signature Supabase has just checked (getUser). */
-function jwtClaims(token: string): Record<string, unknown> | null {
-  try {
-    const part = token.split(".")[1] ?? "";
-    return JSON.parse(Buffer.from(part.replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf8")) as Record<string, unknown>;
-  } catch {
-    return null;
-  }
-}
-
 /**
  * `Authorization: Bearer <access_token>` → the owner's store account, or null.
- * Same rule as SQL part 9: Supabase must accept the token, the email must be the owner's, the
- * session must come from Google sign-in, and the store account with that email must be ADMIN.
+ * Same rule as SQL part 9: Supabase must accept the token, it must belong to the confirmed
+ * Supabase Auth account with the owner's email, and the store account with that email must be ADMIN.
  */
 export async function ownerFromBearer(request: Request, state?: NovaState | null) {
   const token = /^Bearer\s+(\S+)$/i.exec(request.headers.get("authorization") ?? "")?.[1];
@@ -146,12 +136,7 @@ export async function ownerFromBearer(request: Request, state?: NovaState | null
   if (!supabase) return null;
   const { data, error } = await supabase.auth.getUser(token);
   const email = data.user?.email?.toLowerCase() ?? "";
-  if (error || email !== OWNER_EMAIL) return null;
-  const claims = jwtClaims(token);
-  const appMeta = (claims?.app_metadata ?? {}) as { provider?: unknown };
-  const amr = Array.isArray(claims?.amr) ? (claims?.amr as Array<{ method?: unknown }>) : [];
-  const google = appMeta.provider === "google" || amr.some((entry) => entry?.method === "oauth");
-  if (!google || String(claims?.email ?? "").toLowerCase() !== OWNER_EMAIL) return null;
+  if (error || email !== OWNER_EMAIL || !data.user?.email_confirmed_at) return null;
   const store = state ?? (await loadServerState());
   const user = store?.users.find((item) => item.email.toLowerCase() === OWNER_EMAIL && item.role === "ADMIN");
   return user ?? null;

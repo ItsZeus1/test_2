@@ -1221,7 +1221,7 @@ async function commit<T>(
         const base = cloneState(memory ?? (await loadAuthoritative()));
         const drafted = await mutator(cloneState(base));
         // v35: with SQL part 9 installed, money / price / catalog changes need the owner's secure
-        // (Google) session — say so now instead of letting the database quietly put them back.
+        // Supabase session — say so now instead of letting the database quietly put them back.
         if (guardState !== "absent" && touchesGuarded(base, drafted.state)) {
           const actor = await currentUser(base);
           if (actor?.role === "ADMIN") {
@@ -1800,6 +1800,8 @@ export async function loginAccount(input: unknown, language: "ar" | "en" = "ar")
       return { state, result: { token: issued } };
     });
     if ("error" in outcome) return { ok: false, error: outcome.error };
+    // v35: the admin's normal sign-in also opens the owner's secure Supabase session (silently).
+    if (isAdminEmail(parsed.data.email)) await activateOwnerSession(parsed.data.password).catch(() => undefined);
     notifyAuth();
     const profile = await readProfile();
     if (!profile) return { ok: false, error: "Signed in, but the profile could not be read." };
@@ -4435,7 +4437,7 @@ export function onPresence(listener: (ids: Set<string>) => void): () => void {
 /* ------------------------------ v35: owner secure session (SQL part 9 guard) ------------------------------ */
 
 type GuardState = "unknown" | "absent" | "trusted" | "untrusted";
-/** absent = part 9 not installed · trusted = this browser holds the owner's Google session. */
+/** absent = part 9 not installed · trusted = this browser holds the owner's confirmed Supabase session. */
 let guardState: GuardState = "unknown";
 
 /** Asks the database whether the money guard is installed and whether this browser is the verified owner. */
@@ -4466,8 +4468,8 @@ export function getGuardState(): GuardState {
 function ownerSessionText(): string {
   const english = typeof document !== "undefined" && document.documentElement.lang === "en";
   return english
-    ? "🔐 Saving money, price or catalog changes needs the owner's secure session: sign out, then sign in with the owner's Google account."
-    : "🔐 حفظ التغييرات المالية والأسعار يحتاج «جلسة المالك الآمنة»: سجّل الخروج ثم ادخل بحساب Google الخاص بالمدير.";
+    ? "🔐 Saving money, price or catalog changes needs the owner's secure session: Admin → Settings → “Turn on secure session”."
+    : "🔐 حفظ التغييرات المالية والأسعار يحتاج «جلسة المالك الآمنة»: الإدارة ← الإعدادات ← «تفعيل الجلسة الآمنة».";
 }
 
 const GUARDED_KEYS = [
@@ -4492,9 +4494,35 @@ function touchesGuarded(before: NovaState, after: NovaState): boolean {
   return after.balanceRequests.some((item) => (requests.has(item.id) ? requests.get(item.id) !== `${item.status}|${item.cents}` : item.status !== "PROCESSING"));
 }
 
-/** Owner: open Google sign-in to start the secure session (the store account stays the same). */
-export function startOwnerSecureSession(): Promise<{ ok: true } | Err> {
-  return startGoogleSignIn();
+/**
+ * Owner: signs the owner's Supabase Auth account in (email + password) and keeps that session on this
+ * device. It is what SQL part 9 trusts for money / price changes and what the backup route checks.
+ * Runs by itself when the admin signs in; the Settings card can run it again.
+ */
+export async function activateOwnerSession(password: string): Promise<{ ok: true } | Err> {
+  const client = getSupabase();
+  const english = typeof document !== "undefined" && document.documentElement.lang === "en";
+  if (!client) return { ok: false, error: "Supabase is not configured on this site." };
+  try {
+    const { data, error } = await withTimeout(client.auth.signInWithPassword({ email: ADMIN_EMAIL, password }), 6000);
+    if (error || !data.session) {
+      const message = error?.message ?? "";
+      if (/not confirmed/i.test(message)) {
+        return { ok: false, error: english ? "Confirm majd@elmadani.com in Supabase → Authentication → Users first." : "أكّد البريد majd@elmadani.com أولاً من Supabase ← Authentication ← Users." };
+      }
+      return {
+        ok: false,
+        error: english
+          ? "Supabase didn't accept this password. One-time setup: Supabase → Authentication → Users → Add user → majd@elmadani.com, the same password as the store admin, tick “Auto Confirm User”."
+          : "لم يقبل Supabase كلمة المرور. إعداد لمرة واحدة: Supabase ← Authentication ← Users ← Add user ← majd@elmadani.com بنفس كلمة مرور المدير في المتجر، مع تفعيل «Auto Confirm User».",
+      };
+    }
+    guardState = "unknown";
+    await refreshGuardStatus();
+    return { ok: true };
+  } catch {
+    return { ok: false, error: english ? "The connection is slow — please try again." : "الاتصال بطيء — حاول مجدداً." };
+  }
 }
 
 /* ------------------------------ v35: admin backup (server-checked) ------------------------------ */

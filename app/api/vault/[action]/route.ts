@@ -190,12 +190,12 @@ async function adminPost(request: Request) {
   }
   const state = await loadServerState();
   // v35: once SQL part 9 is installed, the vault (it holds unsold codes) needs the owner's verified
-  // Google session — a store session alone could be forged. Before part 9: the store session, as before.
+  // Supabase session — a store session alone could be forged. Before part 9: the store session, as before.
   const owner = state ? await ownerFromBearer(request, state) : null;
   const admin = owner ?? (state && !(await guardInstalled()) ? await adminFromToken(state, body.token) : null);
   if (!admin || !state) {
     return NextResponse.json(
-      { ok: false, error: "🔐 جلسة المالك الآمنة مطلوبة: ادخل بحساب Google الخاص بالمدير · Owner secure session required: sign in with the owner's Google account." },
+      { ok: false, error: "🔐 جلسة المالك الآمنة مطلوبة: فعّلها من الإدارة ← الإعدادات · Owner secure session required: turn it on in Admin → Settings." },
       { status: 403 },
     );
   }
