@@ -12,6 +12,7 @@ import { useProfileState } from "@/components/profile";
 import { listMyLedger, listMyOrders, markVaultDelivered, onStoreChange, pokeMegaOrders } from "@/lib/store/api";
 import { orderStatusText, useI18n, useMoney } from "@/lib/i18n";
 import type { OrderRow, WalletLedgerEntry } from "@/lib/store/types";
+import { readDelivered } from "@/lib/store/data";
 
 export function OrdersPage() {
   const { profile, ready } = useProfileState();
@@ -319,20 +320,25 @@ function OrderTracking({ order, ar, compact = false }: { order: OrderRow; ar: bo
       </ol>
       {track.codes?.length ? (
         <div className="mt-2 grid gap-1.5">
-          {track.codes.map((code) => (
-            <div key={code} className="flex items-center gap-2 rounded-[12px] bg-emerald-500/10 px-3 py-2">
-              <code dir="ltr" className="min-w-0 flex-1 truncate text-sm font-extrabold tracking-wide">
-                {code}
-              </code>
-              <button
-                type="button"
-                onClick={() => void navigator.clipboard.writeText(code)}
-                className="min-h-9 shrink-0 rounded-full border border-emerald-500/40 px-3 text-xs font-bold text-emerald-700 dark:text-emerald-300"
-              >
-                {ar ? "نسخ" : "Copy"}
-              </button>
-            </div>
-          ))}
+          {track.codes.map((code) => {
+            // v38.5: an account ("email:password", "Email: … | Password: …") shows as labelled lines.
+            const lines = readDelivered(code, ar);
+            if (lines.length > 1 || lines[0]?.label) return <DeliveredDetails key={code} items={lines} ar={ar} />;
+            return (
+              <div key={code} className="flex items-center gap-2 rounded-[12px] bg-emerald-500/10 px-3 py-2">
+                <code dir="ltr" className="min-w-0 flex-1 text-sm font-extrabold tracking-wide break-all">
+                  {code}
+                </code>
+                <button
+                  type="button"
+                  onClick={() => void navigator.clipboard.writeText(code)}
+                  className="min-h-9 shrink-0 rounded-full border border-emerald-500/40 px-3 text-xs font-bold text-emerald-700 dark:text-emerald-300"
+                >
+                  {ar ? "نسخ" : "Copy"}
+                </button>
+              </div>
+            );
+          })}
         </div>
       ) : null}
       {!compact && track.note ? <p className="mt-2 text-xs text-muted" dir="auto">{track.note}</p> : null}

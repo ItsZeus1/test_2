@@ -2,6 +2,7 @@
 import webpush from "web-push";
 
 import { adminClient } from "@/lib/server/supabase-admin";
+import { readDelivered } from "@/lib/store/data";
 
 export type PushPayload = { title: string; body: string; url: string; tag: string };
 
@@ -170,4 +171,18 @@ export function purchaseAlertHtml(order: PurchaseOrder, who?: { name?: string; e
     order.receiptNumber ? `\n🧾 #${tgEscape(order.receiptNumber)}` : "",
   ];
   return lines.filter(Boolean).join("\n");
+}
+
+/** v38.5: codes / accounts for Telegram — an account shows as labelled, tap-to-copy lines. */
+export function deliveredHtml(codes: string[]): string[] {
+  const out: string[] = [];
+  for (const code of codes) {
+    const lines = readDelivered(code, true);
+    if (lines.length > 1 || lines[0]?.label) {
+      out.push("🔐 <b>بيانات الحساب:</b>", ...lines.map((line) => `${tgEscape(line.label)}: <code>${tgEscape(line.value)}</code>`));
+    } else {
+      out.push("🎟 <b>الكود:</b>", `<code>${tgEscape(code)}</code>`);
+    }
+  }
+  return out;
 }

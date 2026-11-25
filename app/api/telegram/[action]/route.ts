@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 import {
   adminChatIds,
   claimTelegramEvent,
+  deliveredHtml,
   purchaseAlertHtml,
   sendTelegram,
   telegramApi,
@@ -398,7 +399,7 @@ function build(state: State, kind: Kind, id: string, messageId?: string): Built 
     const lines = [
       done ? "✅ <b>تم تنفيذ طلبك بنجاح</b>" : "↩️ <b>تم إلغاء الطلب وإعادة المبلغ إلى محفظتك</b>",
       `🛒 ${tgEscape(order.serviceName)} · ${tgEscape(order.packageName)}`,
-      ...(codes.length ? ["", "🎟 <b>الكود:</b>", ...codes.map((code) => `<code>${tgEscape(code)}</code>`)] : []),
+      ...(codes.length ? ["", ...deliveredHtml(codes)] : []),
       ...(delivery.length ? ["", "🔐 <b>تفاصيل طلبك:</b>", ...delivery.map((item) => `${tgEscape(item.label)}: <code>${tgEscape(item.value)}</code>`)] : []),
       "",
       `💵 ${tgEscape(money(order.priceCents, order.currency))}${order.receiptNumber ? ` · #${tgEscape(order.receiptNumber)}` : ""}`,
@@ -440,7 +441,11 @@ function build(state: State, kind: Kind, id: string, messageId?: string): Built 
       `👤 ${tgEscape(user?.name ?? "?")}${user?.email ? ` · ${tgEscape(user.email)}` : ""}`,
       `🛒 ${tgEscape(order.serviceName)} · ${tgEscape(order.packageName)}`,
       `💵 ${tgEscape(money(order.priceCents, order.currency))}`,
-      ...(fields.length ? fields : [`🆔 <code>${tgEscape(order.targetId || "—")}</code>`]),
+      ...(fields.length
+        ? fields
+        : order.targetId
+          ? [`🆔 <code>${tgEscape(order.targetId)}</code>`]
+          : ["🎁 لا يحتاج بيانات — سلّمه الكود أو الحساب من «الطلبات اليدوية»"]),
       order.receiptNumber ? `#${tgEscape(order.receiptNumber)}` : "",
     ];
     return { key: `manual:${order.id}`, text: lines.filter(Boolean).join("\n"), to: { admin: true } };

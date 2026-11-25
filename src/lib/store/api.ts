@@ -17,6 +17,7 @@ import {
   DEFAULT_TICKER_EN,
   CATEGORY_ORDER,
   pinRank,
+  targetOf,
   CLOUD_ROW_ID,
   CLOUD_TABLE,
   SEED_PACKAGES,
@@ -1516,7 +1517,7 @@ function catalogOf(state: NovaState, role: Role | null, currency: Currency = "US
         currency,
         rate: rateFor(role),
         deliverySpeed: (service.deliverySpeed === "MANUAL" ? "MANUAL" : "INSTANT") as CatalogService["deliverySpeed"],
-        targetInputType: (service.targetInputType === "LANDLINE_PHONE" ? "LANDLINE_PHONE" : "PLAYER_ID") as CatalogService["targetInputType"],
+        targetInputType: targetOf(service.targetInputType) as CatalogService["targetInputType"],
         serviceMode: mode,
         groupId: groupOf(service, state.serviceGroups ?? DEFAULT_GROUPS),
         outOfStock: service.outOfStock === true || megaOff,
@@ -1583,7 +1584,7 @@ function detailOf(state: NovaState, slug: string, role: Role | null, currency: C
     currency,
     rate: rateFor(role),
     deliverySpeed: service.deliverySpeed === "MANUAL" ? "MANUAL" : "INSTANT",
-    targetInputType: service.targetInputType === "LANDLINE_PHONE" ? "LANDLINE_PHONE" : "PLAYER_ID",
+    targetInputType: targetOf(service.targetInputType),
     packages,
     customFields: fieldsOf(service),
     outOfStock: service.outOfStock === true,
@@ -2208,9 +2209,10 @@ async function draftPurchase(state: NovaState, data: PurchaseInput, ip: string, 
     throw new Error(`يرجى تعبئة «${ar}» · Please fill in “${en}”.`);
   }
   // The first answer doubles as the target ID (what providers and the admin list show).
-  const targetId: string =
-    mode === "VAULT" ? "" : wanted.length ? (fields.find((field) => field.value)?.value ?? "").slice(0, 80) : String(parsed.data.targetId ?? "");
-  if (mode !== "VAULT" && !wanted.length && targetId.length < 3) throw new Error("Enter the full account or player ID.");
+  // v38.5: "nothing needed" services (codes / accounts we hand over) ask the customer for nothing.
+  const noInput = mode === "VAULT" || (service.targetInputType === "NONE" && !wanted.length);
+  const targetId: string = noInput ? "" : wanted.length ? (fields.find((field) => field.value)?.value ?? "").slice(0, 80) : String(parsed.data.targetId ?? "");
+  if (!noInput && !wanted.length && targetId.length < 3) throw new Error("Enter the full account or player ID.");
   if (user.balanceCents < price) throw new Error("Not enough wallet balance for this package.");
   user.balanceCents -= price;
   user.lastIp = ip;
@@ -2485,7 +2487,7 @@ function adminServiceOf(state: NovaState, slug: string): AdminService | null {
     nameAr: service.nameAr || "",
     descriptionAr: service.descriptionAr || "",
     deliverySpeed: service.deliverySpeed === "MANUAL" ? "MANUAL" : "INSTANT",
-    targetInputType: service.targetInputType === "LANDLINE_PHONE" ? "LANDLINE_PHONE" : "PLAYER_ID",
+    targetInputType: targetOf(service.targetInputType),
     serviceMode: service.serviceMode ?? "PACKAGES",
     counter: normalizeCounter(service.counter),
     groupId: service.groupId ?? "",
@@ -5173,7 +5175,7 @@ export function pokeMegaOrders(): void {
     .catch(() => undefined);
 }
 
-export type MegaProductView = { id: number; name: string; price: number; active: boolean; qty?: { min: number; max: number } };
+export type MegaProductView = { id: number; name: string; price: number; active: boolean; qty?: { min: number; max: number }; /** v38.5: Mega asks nothing — we give a code / account. */ give?: boolean };
 export type MegaLinkRow = {
   packageId: string;
   sizeName: string;

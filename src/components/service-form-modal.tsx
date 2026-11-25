@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState, type ChangeEvent, type ReactNode } from "react";
-import { ArrowDown, ArrowUp, ChevronDown, ClipboardList, Globe, Hourglass, ImagePlus, Layers, LockKeyhole, Plus, ScrollText, SlidersHorizontal, Trash2, Upload, X, Zap, type LucideIcon } from "lucide-react";
+import { ArrowDown, ArrowUp, ChevronDown, ClipboardList, Gift, Globe, Hourglass, ImagePlus, Layers, LockKeyhole, Plus, ScrollText, SlidersHorizontal, Trash2, Upload, X, Zap, type LucideIcon } from "lucide-react";
 import { toast } from "sonner";
 
 import { ServiceMark } from "@/components/service-mark";
@@ -54,7 +54,7 @@ type FormState = {
     per: number;
     mega?: { id: number; name?: string; cost?: number; active: boolean };
   };
-  targetInputType: "PLAYER_ID" | "LANDLINE_PHONE";
+  targetInputType: "PLAYER_ID" | "LANDLINE_PHONE" | "NONE";
   instructions: string;
   instructionsAr: string;
   badge: string;
@@ -614,7 +614,8 @@ export function ServiceFormModal() {
                     patch({
                       deliverySpeed: value as "INSTANT" | "MANUAL",
                       serviceMode: form.serviceMode === "VAULT" ? "PACKAGES" : form.serviceMode,
-                      ...(value === "MANUAL" ? {} : { targetInputType: "PLAYER_ID" as const }),
+                      // Landlines are manual-only; "nothing needed" works both ways (v38.5).
+                      ...(value === "MANUAL" || form.targetInputType !== "LANDLINE_PHONE" ? {} : { targetInputType: "PLAYER_ID" as const }),
                     });
                 }}
               />
@@ -643,10 +644,18 @@ export function ServiceFormModal() {
                 options={[
                   { value: "PLAYER_ID", label: t.targetPlayer },
                   { value: "LANDLINE_PHONE", label: t.targetLandline },
+                  { value: "NONE", label: ar ? "لا يحتاج بيانات" : "Nothing needed", icon: Gift },
                 ]}
                 onChange={(value) => patch({ targetInputType: value as FormState["targetInputType"] })}
               />
             )}
+            {form.serviceMode !== "VAULT" && form.targetInputType === "NONE" ? (
+              <p className="give-note rounded-[14px] px-3 py-2 text-[11px] leading-relaxed">
+                {ar
+                  ? "🎁 الزبون لا يكتب أي شيء — نحن نعطيه: كود أو حساب. إن كانت الأحجام مربوطة بـ Mega يصله فوراً تلقائياً، وإلا يظهر الطلب في «الطلبات اليدوية» لتكتب له الكود أو بيانات الحساب ويصله على طلباته وتيليغرام."
+                  : "🎁 The customer types nothing — we give: a code or an account. Mega-linked sizes deliver it instantly; otherwise the order waits in the manual queue where you type the code / account details, and it reaches their orders and Telegram."}
+              </p>
+            ) : null}
 
             {form.serviceMode === "POINT_COUNTER" ? (
               <div className="grid min-w-0 grid-cols-2 gap-2 rounded-[18px] border border-white/10 bg-white/[0.03] p-2 sm:grid-cols-3">

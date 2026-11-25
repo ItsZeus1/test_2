@@ -85,6 +85,8 @@ export function ServiceCheckout({ slug }: { slug: string }) {
   // v31: admin-defined customer fields replace the single ID / phone box when present.
   // v38.1: a size may ask its own fields; otherwise the service's apply.
   const customFields = isVault ? [] : buying?.customFields?.length ? buying.customFields : (service?.customFields ?? []);
+  // v38.5: "nothing needed" — the customer types nothing; we hand over a code or an account.
+  const noInput = isVault || (service?.targetInputType === "NONE" && customFields.length === 0);
   const useFields = customFields.length > 0;
   const [fieldValues, setFieldValues] = useState<Record<string, string>>({});
   const fieldLabel = (field: CustomField) => (language === "ar" ? field.labelAr || field.labelEn : field.labelEn || field.labelAr);
@@ -210,7 +212,7 @@ export function ServiceCheckout({ slug }: { slug: string }) {
       const summary = `${service ? serviceText(language, service).name : ""} · ${buying.sizeName} · ${money(buying.priceCents, service?.currency ?? "USD")}`;
       const request = buying.id.startsWith("points:")
         ? purchase({ serviceId: service?.id, points: Number(buying.id.slice(7)), targetId: useFields ? "" : targetId, fields: fieldAnswers })
-        : purchase({ packageId: buying.id, targetId: isVault || useFields ? "" : targetId, fields: fieldAnswers });
+        : purchase({ packageId: buying.id, targetId: noInput || useFields ? "" : targetId, fields: fieldAnswers });
       const result = await hud.run("purchase", summary, request);
       setCooldownUntil(startedAt + CHARGE_COOLDOWN_MS);
       setNow(Date.now());
@@ -637,6 +639,13 @@ export function ServiceCheckout({ slug }: { slug: string }) {
               </button>
             </div>
             {isVault ? <p className="mt-4 rounded-2xl bg-emerald-500/10 px-3 py-2.5 text-sm font-semibold text-emerald-700">{t.vaultNoInput}</p> : null}
+            {noInput && !isVault ? (
+              <p className="give-note mt-4 rounded-2xl px-3 py-2.5 text-sm font-semibold">
+                {language === "ar"
+                  ? "🎁 لا تحتاج لإدخال أي شيء — ستستلم الكود أو بيانات الحساب في «طلباتي» وعلى تيليغرام."
+                  : "🎁 Nothing to type — you'll receive the code or account details in My Orders and on Telegram."}
+              </p>
+            ) : null}
             {useFields ? (
               <fieldset className="mt-4 grid gap-3">
                 <legend className="sr-only">{language === "ar" ? "البيانات المطلوبة" : "Required details"}</legend>
@@ -690,7 +699,7 @@ export function ServiceCheckout({ slug }: { slug: string }) {
                 })}
               </fieldset>
             ) : null}
-            <div className={`mt-4 flex min-w-0 flex-wrap items-center justify-between gap-x-2 gap-y-1.5 ${isVault || useFields ? "hidden" : ""}`}>
+            <div className={`mt-4 flex min-w-0 flex-wrap items-center justify-between gap-x-2 gap-y-1.5 ${noInput || useFields ? "hidden" : ""}`}>
               <label className="text-sm font-semibold" htmlFor="target-id">
                 {landline ? t.landlineLabel : targetText(t, service.category)}
               </label>
@@ -731,7 +740,7 @@ export function ServiceCheckout({ slug }: { slug: string }) {
               placeholder={landline ? t.landlinePh : targetText(t, service.category)}
               dir="ltr"
               inputMode={landline ? "tel" : undefined}
-              className={`field mt-2 ${isVault || useFields ? "hidden" : ""}`}
+              className={`field mt-2 ${noInput || useFields ? "hidden" : ""}`}
               autoComplete="off"
             />
             {formError ? <p className="mt-3 text-sm text-rose-200">{formError}</p> : null}
@@ -749,7 +758,7 @@ export function ServiceCheckout({ slug }: { slug: string }) {
                   document.getElementById(`cf-${missingField.id}`)?.focus();
                   return;
                 }
-                if (!isVault && !useFields && targetId.trim().length < 3) {
+                if (!noInput && !useFields && targetId.trim().length < 3) {
                   setFormError(targetText(t, service.category));
                   return;
                 }
@@ -801,7 +810,7 @@ export function ServiceCheckout({ slug }: { slug: string }) {
                   ) : null,
                 )
               : null}
-            <div className={`flex items-center justify-between gap-3 ${isVault || useFields ? "hidden" : ""}`}>
+            <div className={`flex items-center justify-between gap-3 ${noInput || useFields ? "hidden" : ""}`}>
               <dt>{targetText(t, service.category)}</dt>
               <dd className="truncate font-semibold text-fg" dir="ltr">
                 {targetId.trim()}
@@ -813,7 +822,7 @@ export function ServiceCheckout({ slug }: { slug: string }) {
             </div>
           </dl>
         ) : null}
-        {buying && !isVault ? (
+        {buying && !noInput ? (
           <div className="mt-3 space-y-2.5 text-start">
             {/* Big, high-contrast copy of what was typed, so every character can be checked */}
             <div className={`id-inspect rounded-[14px] px-3 py-2.5 ${useFields ? "hidden" : ""}`}>

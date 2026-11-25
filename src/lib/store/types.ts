@@ -60,7 +60,8 @@ export type FeedItem = {
   receiptNumber: string;
   createdAt: string;
 };
-export type TargetInputType = "PLAYER_ID" | "LANDLINE_PHONE";
+/** v38.5: "NONE" = the customer types nothing — we hand over a code or an account (API or by hand). */
+export type TargetInputType = "PLAYER_ID" | "LANDLINE_PHONE" | "NONE";
 /** PACKAGES = fixed charge sizes · POINT_COUNTER = buy any number of points · VAULT = ready accounts/codes, no input. */
 export type ServiceMode = "PACKAGES" | "POINT_COUNTER" | "VAULT";
 

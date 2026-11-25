@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-import { adminChatIds, claimTelegramEvent, purchaseAlertHtml, sendTelegram, telegramConfigured, tgEscape, userChatIds } from "@/lib/server/push";
+import { adminChatIds, claimTelegramEvent, deliveredHtml, purchaseAlertHtml, sendTelegram, telegramConfigured, tgEscape, userChatIds } from "@/lib/server/push";
 import {
   adminClient,
   adminFromToken,
@@ -251,7 +251,7 @@ async function delivered(order: StoredOrder, track: ProviderTrack, row: MegaOrde
     [
       "✅ <b>تم تنفيذ طلبك بنجاح</b>",
       `🛒 ${tgEscape(order.serviceName)} · ${tgEscape(order.packageName)}`,
-      ...(codes.length ? ["", "🎟 <b>الكود:</b>", ...codes.map((code) => `<code>${tgEscape(code)}</code>`)] : []),
+      ...(codes.length ? ["", ...deliveredHtml(codes)] : []),
       // v38.1: an empty line keeps the order number away from the code.
       ...(order.receiptNumber ? ["", `🧾 رقم الطلب: #${tgEscape(order.receiptNumber)}`] : []),
     ].join("\n"),
@@ -632,6 +632,7 @@ function preview(state: NovaState, products: MegaProduct[]) {
     price: cost(product),
     active: active(product),
     ...(isQty(product) ? { qty: qtyRange(product) } : {}),
+    ...((product.daynamicFields ?? []).length === 0 ? { give: true } : {}),
   });
   const services = state.services.map((service) => {
     const manual = service.groupId === ISP_GROUP;
@@ -969,7 +970,7 @@ async function apply(state: NovaState, products: MegaProduct[], body: Record<str
       imageUrl: /^https:\/\//.test(fieldSource.image ?? "") ? String(fieldSource.image) : (gameProducts.find((product) => /^https:\/\//.test(product.image ?? ""))?.image ?? ""),
       createdAt: now(),
       deliverySpeed: "INSTANT",
-      targetInputType: "PLAYER_ID",
+      targetInputType: fieldsFrom(fieldSource, []).length ? "PLAYER_ID" : "NONE",
       serviceMode: wantsAmount ? "POINT_COUNTER" : "PACKAGES",
       ...(wantsAmount ? { counter: counterFrom(amountProduct!, undefined, settings, serviceId) } : {}),
       customFields: fieldsFrom(fieldSource, []),
@@ -1014,7 +1015,19 @@ async function apply(state: NovaState, products: MegaProduct[], body: Record<str
       idKey: "id",
       id: serviceId,
       // v38.2: an "any amount" link keeps the service in amount mode (it was switched back to sizes).
-      value: { deliverySpeed: "INSTANT", serviceMode: amountServices.has(serviceId) ? "POINT_COUNTER" : "PACKAGES", outOfStock: false, ...(fields.length ? { customFields: fields } : {}) },
+      value: {
+        deliverySpeed: "INSTANT",
+        serviceMode: amountServices.has(serviceId) ? "POINT_COUNTER" : "PACKAGES",
+        outOfStock: false,
+        ...(fields.length
+          ? { customFields: fields, ...(service.targetInputType === "NONE" ? { targetInputType: "PLAYER_ID" } : {}) }
+          : // v38.5: Mega asks nothing for this product (gift cards, accounts): the customer types nothing,
+            // we hand over the code / account Mega returns. Hand-made fields (no megaName) are kept.
+            {
+              targetInputType: ((service.customFields ?? []) as CustomField[]).some((field) => !field.megaName) ? service.targetInputType : "NONE",
+              customFields: ((service.customFields ?? []) as CustomField[]).filter((field) => !field.megaName),
+            }),
+      },
     });
   }
   for (let start = 0; start < ops.length; start += 200) {

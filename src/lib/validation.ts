@@ -126,7 +126,7 @@ export const serviceWriteSchema = z.object({
   name: z.string().trim().min(2).max(80),
   nameAr: z.string().trim().max(80).default(""),
   deliverySpeed: z.enum(["INSTANT", "MANUAL"]).default("INSTANT"),
-  targetInputType: z.enum(["PLAYER_ID", "LANDLINE_PHONE"]).default("PLAYER_ID"),
+  targetInputType: z.enum(["PLAYER_ID", "LANDLINE_PHONE", "NONE"]).default("PLAYER_ID"),
   groupId: z.string().trim().max(60).default(""),
   descriptionAr: z.string().trim().max(500).default(""),
   slug: z

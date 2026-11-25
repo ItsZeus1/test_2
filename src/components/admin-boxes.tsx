@@ -216,6 +216,7 @@ const orderText = (row: AdminOrderRow) => [
 /** v31: the customer's custom checkout answers as receipt lines (falls back to the single ID). */
 function orderFieldLines(row: { targetId: string; fields?: OrderField[] }, ar: boolean): Array<{ label: string; value: string; ltr?: boolean }> {
   if (row.fields?.length) return row.fields.map((field) => ({ label: (ar ? field.labelAr || field.labelEn : field.labelEn || field.labelAr) || "—", value: field.value }));
+  if (!row.targetId) return [{ label: ar ? "بيانات الزبون" : "Customer info", value: ar ? "🎁 لا يحتاج — نسلّمه كوداً أو حساباً" : "🎁 None — we give a code / account" }];
   return [{ label: ar ? "المعرّف / الرقم" : "Player ID / phone", value: row.targetId, ltr: true }];
 }
 
@@ -318,6 +319,10 @@ export function ManualQueueBox() {
               <p className="mt-1 text-sm font-semibold text-amber-600">{t.vaultSoldOut}</p>
             ) : row.fields?.length ? (
               <OrderFields fields={row.fields} />
+            ) : !row.targetId ? (
+              <p className="give-note mt-1 inline-flex rounded-full px-3 py-1 text-xs font-bold">
+                {language === "ar" ? "🎁 لا يحتاج بيانات — اضغط «قبول» واكتب له الكود أو الحساب" : "🎁 No customer info — press Accept and type the code / account"}
+              </p>
             ) : (
               <p className="mt-1 text-sm">
                 {t.landlineLabel}:{" "}
@@ -2320,6 +2325,7 @@ function MegaLinker({ settings, busy, run, onApplied }: { settings: MegaSettings
                         <span className="block text-[11px] text-muted">
                           #{game.id} · {game.count} {ar ? "منتج" : "products"}
                           {hasAmount ? (ar ? " · كمية حرة" : " · any amount") : ""}
+                          {list.some((product) => product.give) ? (ar ? " · 🎁 يُسلَّم كود/حساب" : " · 🎁 gives a code/account") : ""}
                         </span>
                       </button>
                       {plan ? (
@@ -2358,6 +2364,7 @@ function MegaLinker({ settings, busy, run, onApplied }: { settings: MegaSettings
                           <li key={product.id} className="flex items-center gap-2" dir="auto">
                             <span className="min-w-0 flex-1 truncate">{product.name}</span>
                             {product.qty ? <span className="rounded-full bg-sky-500/12 px-1.5 font-bold text-sky-700 dark:text-sky-300">{product.qty.min}–{product.qty.max}</span> : null}
+                            {product.give ? <span className="give-note rounded-full px-1.5 font-bold" title={ar ? "لا يحتاج بيانات من الزبون — نسلّمه كوداً أو حساباً" : "Customer types nothing — we give a code / account"}>🎁</span> : null}
                             <span dir="ltr" className="tabular-nums text-muted">
                               ${product.price.toFixed(4)}
                               {product.active ? "" : " · off"}
@@ -2461,7 +2468,7 @@ function MegaProductRow({
                 : "— Not linked (manual) —"
         }
         tone={product ? "picked" : "soft"}
-        items={scope.map((item) => ({ id: item.id, title: item.name, meta: `$${item.price.toFixed(4)}${item.active ? "" : " · off"}` }))}
+        items={scope.map((item) => ({ id: item.id, title: `${item.give ? "🎁 " : ""}${item.name}`, meta: `$${item.price.toFixed(4)}${item.active ? "" : " · off"}` }))}
         allItems={all.map((item) => ({ id: item.id, title: item.name, meta: `#${item.id} · $${item.price.toFixed(4)}` }))}
         clearLabel={ar ? "إلغاء الربط (يدوي)" : "Unlink (manual)"}
         onPick={onPick}

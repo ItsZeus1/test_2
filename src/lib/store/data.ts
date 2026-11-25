@@ -711,6 +711,43 @@ export const ARABIC_INSTRUCTIONS: Record<string, string> = {
 };
 
 /** Arabic instructions for any service, even ones the admin wrote only in English. */
+const DELIVERED_LABELS: Array<[RegExp, string, string]> = [
+  [/^(e-?mail|mail|البريد|الإيميل)/i, "البريد", "Email"],
+  [/^(pass(word)?|pwd|كلمة)/i, "كلمة المرور", "Password"],
+  [/^(user(name)?|login|account|اسم)/i, "اسم المستخدم", "Username"],
+  [/^(code|pin|key|voucher|الكود|الرمز)/i, "الكود", "Code"],
+  [/^(serial|sn|التسلسلي)/i, "الرقم التسلسلي", "Serial"],
+];
+
+/**
+ * v38.5: reads what a provider hands over — a plain code, "email:password", or "Label: value"
+ * lines (split by new lines or |) — into labelled lines the customer can copy one by one.
+ */
+export function readDelivered(raw: string, ar = true): Array<{ label: string; value: string }> {
+  const text = String(raw ?? "").trim();
+  if (!text) return [];
+  const nice = (label: string) => {
+    const hit = DELIVERED_LABELS.find(([pattern]) => pattern.test(label.trim()));
+    return hit ? (ar ? hit[1] : hit[2]) : label.trim();
+  };
+  // "email:password" first (its left side would otherwise look like a label).
+  const account = /^([^\s:|]+@[^\s:|]+\.[a-z]{2,})\s*[:|/;]\s*(\S+)$/i.exec(text);
+  if (account) return [{ label: ar ? "البريد" : "Email", value: account[1] }, { label: ar ? "كلمة المرور" : "Password", value: account[2] }];
+  const parts = text.split(/\s*(?:\r?\n|\|)\s*/).filter(Boolean);
+  const pairs = parts.map((part) => /^([^:=\/@]{2,30}?)\s*[:=]\s*(?!\/\/)(.+)$/.exec(part));
+  // A label is a known word, or has lower-case / Arabic letters ("XXXX:YYYY" stays one code).
+  const isLabel = (label: string) => DELIVERED_LABELS.some(([pattern]) => pattern.test(label.trim())) || /[a-z\u0600-\u06FF]/.test(label);
+  if (pairs.every((match) => match && isLabel(match[1]))) {
+    return pairs.map((match) => ({ label: nice(match![1]), value: match![2].trim() }));
+  }
+  return [{ label: "", value: text }];
+}
+
+/** v38.5: the three kinds of customer input (unknown values fall back to a player ID). */
+export function targetOf(value: unknown): "PLAYER_ID" | "LANDLINE_PHONE" | "NONE" {
+  return value === "LANDLINE_PHONE" || value === "NONE" ? value : "PLAYER_ID";
+}
+
 export function arabicInstructionsFallback(service: { slug: string; targetInputType?: string; deliverySpeed?: string; serviceMode?: string }): string {
   if (ARABIC_INSTRUCTIONS[service.slug]) return ARABIC_INSTRUCTIONS[service.slug];
   if (service.serviceMode === "VAULT") return "لا تحتاج لإدخال أي بيانات: بعد الشراء تظهر لك بيانات الحساب أو الرمز فوراً مع أزرار النسخ، وتبقى محفوظة في «طلباتي».";
@@ -973,7 +1010,7 @@ export function normalizeState(input: unknown): NovaState | null {
         imageUrl: typeof service.imageUrl === "string" ? service.imageUrl : "",
         badge: service.badge ?? null,
         deliverySpeed: service.deliverySpeed === "MANUAL" ? "MANUAL" : "INSTANT",
-        targetInputType: service.targetInputType === "LANDLINE_PHONE" ? "LANDLINE_PHONE" : "PLAYER_ID",
+        targetInputType: targetOf(service.targetInputType),
         serviceMode: service.serviceMode === "POINT_COUNTER" || service.serviceMode === "VAULT" ? service.serviceMode : "PACKAGES",
         groupId: typeof service.groupId === "string" && service.groupId ? service.groupId : undefined,
         counter: normalizeCounter(service.counter),
