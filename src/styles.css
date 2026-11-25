@@ -4826,3 +4826,15 @@ html[dir="ltr"] .oos-tag { letter-spacing: 0.08em; text-transform: uppercase; }
 /* v38.3 — where net earnings start */
 .net-start { color: #92400e; background: rgb(245 158 11 / 0.08); box-shadow: inset 0 0 0 1px rgb(245 158 11 / 0.25); }
 :root.dark .net-start { color: #fcd34d; background: rgb(245 158 11 / 0.1); }
+
+/* v38.4 — Telegram reminder card */
+.tg-nudge {
+  background: var(--nc-card-solid);
+  box-shadow: 0 0 0 1px var(--nc-border), 0 28px 60px -24px rgb(15 23 42 / 0.55);
+  animation: tg-nudge-in 0.38s cubic-bezier(0.2, 0.9, 0.3, 1.1);
+}
+.tg-nudge-icon { color: #fff; background: linear-gradient(135deg, #38bdf8, #0284c7); box-shadow: 0 10px 22px -10px rgb(2 132 199 / 0.9); }
+.tg-nudge-go { background: linear-gradient(135deg, #0ea5e9, #0284c7); box-shadow: 0 12px 24px -12px rgb(2 132 199 / 0.9); }
+:root.dark .tg-nudge { background: #161e2e; }
+@keyframes tg-nudge-in { from { opacity: 0; transform: translateY(16px) scale(0.98); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) { .tg-nudge { animation: none; } }

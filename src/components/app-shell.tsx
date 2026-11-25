@@ -8,7 +8,7 @@ import dynamic from "next/dynamic";
 import Lenis from "lenis";
 import { Toaster } from "sonner";
 
-import { Navbar } from "@/components/navbar";
+import { Navbar, TelegramNudge } from "@/components/navbar";
 import { MeView, ProfileProvider, useProfileState } from "@/components/profile";
 import { GroupsView } from "@/components/storefront";
 import { SupportPill } from "@/components/support-pill";
@@ -449,6 +449,7 @@ export function AppShell({ children }: { children: ReactNode }) {
         <CompleteProfileGate />
         <CookieBanner />
         <CustomerAlerts />
+        <TelegramNudge />
         <OpenModals />
         <ThemedToaster />
       </div>

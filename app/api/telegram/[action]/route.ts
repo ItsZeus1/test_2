@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 import {
   adminChatIds,
   claimTelegramEvent,
+  purchaseAlertHtml,
   sendTelegram,
   telegramApi,
   telegramBotUsername,
@@ -31,7 +32,7 @@ export const dynamic = "force-dynamic";
 const FRESH_MS = 15 * 60_000;
 const MAX_ADMINS = 3;
 const CODE_TTL_MS = 30 * 60_000;
-const KINDS = ["topup", "manual", "support", "recovery", "honeypot", "topup_result", "order_result", "support_reply"] as const;
+const KINDS = ["topup", "manual", "support", "recovery", "honeypot", "topup_result", "order_result", "support_reply", "purchase"] as const;
 type Kind = (typeof KINDS)[number];
 type Built = { key: string; text: string; to: { admin?: boolean; user?: string } };
 const METHOD: Record<string, string> = { SHAMCASH: "شام كاش", SYRIATEL_CASH: "سيريتل كاش", MTN_CASH: "MTN كاش" };
@@ -108,7 +109,10 @@ async function adminAction(request: Request, body: Record<string, unknown>) {
     });
     await telegramApi("setMyCommands", {
       commands: [
-        { command: "start", description: "ربط الحساب · Link account" },
+        { command: "start", description: "القائمة · Menu" },
+        { command: "me", description: "حسابي ورصيدي · My account" },
+        { command: "orders", description: "آخر طلباتي · My orders" },
+        { command: "admin", description: "لوحة الإدارة · Admin summary" },
         { command: "stop", description: "إلغاء الربط · Unlink" },
       ],
     });
@@ -156,14 +160,19 @@ async function webhook(request: Request) {
   if (!supabase) return json({ ok: true });
   const reply = (html: string) => sendTelegram(html, [chatId]);
 
+  const site = new URL(request.url).origin;
+  const { data: linkRow } = await supabase.from("telegram_links").select("user_id,is_admin").eq("chat_id", chatId).maybeSingle();
+  const link = linkRow as { user_id: string | null; is_admin: boolean } | null;
+
   if (/^\/stop\b/i.test(textIn)) {
     await supabase.from("telegram_links").delete().eq("chat_id", chatId);
-    await reply("🔕 تم إلغاء الربط. لن تصلك أي تنبيهات بعد الآن.\nUnlinked — no more alerts.");
+    await sendTelegram("🔕 تم إلغاء الربط. لن تصلك أي تنبيهات بعد الآن.\nUnlinked — no more alerts.\n\nللربط من جديد أرسل /start", [chatId], { reply_markup: { remove_keyboard: true } });
     return json({ ok: true });
   }
   const start = /^\/start(?:@\w+)?\s+([A-Za-z0-9]{8,40})$/i.exec(textIn);
   if (!start) {
-    await reply("👋 أهلاً بك في زوفا شارج.\nلربط حسابك افتح الموقع ← القائمة ← «ربط تيليغرام».\nTo link your account: open the site → menu → “Link Telegram”.");
+    // v38.4: a real bot — it knows who you are once linked (menu, account, orders, admin summary).
+    await chatMenu(chatId, textIn, link, site);
     return json({ ok: true });
   }
   const code = start[1];
@@ -172,7 +181,9 @@ async function webhook(request: Request) {
   // One use only, whatever happens next.
   if (found) await supabase.from("telegram_codes").delete().eq("code", code);
   if (!found || Date.parse(found.expires_at) < Date.now()) {
-    await reply("⌛️ هذا الرابط منتهي أو مستخدم. أنشئ رابطاً جديداً من الموقع.\nThis link has expired — create a new one on the site.");
+    await sendTelegram("⌛️ هذا الرابط منتهي أو مستخدم.\nاضغط الزر لإنشاء رابط جديد.\nThis link has expired — tap to get a new one.", [chatId], {
+      reply_markup: { inline_keyboard: [[{ text: "🔗 رابط جديد · New link", url: `${site}/?tg=link` }]] },
+    });
     return json({ ok: true });
   }
   const from = message?.from ?? {};
@@ -186,12 +197,153 @@ async function webhook(request: Request) {
       return json({ ok: true });
     }
     await supabase.from("telegram_links").upsert({ chat_id: chatId, user_id: current?.user_id ?? null, is_admin: true, ...profile }, { onConflict: "chat_id" });
-    await reply("🛡 <b>تم ربطك كمدير.</b>\nستصلك تنبيهات الشحن والطلبات والدعم والأمان هنا.\nYou're linked as an admin.");
+    await sendTelegram("🛡 <b>تم ربطك كمدير.</b>\nستصلك هنا تنبيهات الشحن والطلبات والمشتريات والدعم والأمان.\nYou're linked as an admin.", [chatId], { reply_markup: keyboardFor({ user_id: current?.user_id ?? null, is_admin: true }) });
   } else {
     await supabase.from("telegram_links").upsert({ chat_id: chatId, user_id: found.user_id, is_admin: current?.is_admin ?? false, ...profile }, { onConflict: "chat_id" });
-    await reply("✅ <b>تم ربط حسابك في زوفا شارج.</b>\nستصلك هنا تنبيهات طلباتك وشحن محفظتك فقط.\nYour account is linked — only your own alerts come here.");
+    const state = await loadServerState();
+    const user = state?.users.find((row) => row.id === found.user_id);
+    await sendTelegram(
+      `✅ <b>أهلاً ${tgEscape(user?.name ?? "")}! تم ربط حسابك في زوفا شارج.</b>\n📧 ${tgEscape(maskEmail(user?.email))}\nستصلك هنا تنبيهات طلباتك وشحن محفظتك فقط.\n\nYour account is linked — only your own alerts come here.`,
+      [chatId],
+      { reply_markup: keyboardFor({ user_id: found.user_id, is_admin: current?.is_admin ?? false }) },
+    );
   }
   return json({ ok: true });
+}
+
+/* ------------------------------ v38.4 · the bot's own screens ------------------------------ */
+
+const BTN = { me: "👤 حسابي", orders: "🧾 طلباتي", admin: "📊 لوحة الإدارة", help: "❓ مساعدة" } as const;
+
+function keyboardFor(link: { user_id: string | null; is_admin: boolean } | null) {
+  const rows: Array<Array<{ text: string }>> = [];
+  if (link?.user_id) rows.push([{ text: BTN.me }, { text: BTN.orders }]);
+  if (link?.is_admin) rows.push([{ text: BTN.admin }]);
+  rows.push([{ text: BTN.help }]);
+  return { keyboard: rows, resize_keyboard: true, is_persistent: true };
+}
+
+function maskEmail(email?: string): string {
+  if (!email) return "—";
+  const [name, domain] = email.split("@");
+  if (!domain) return email;
+  return `${name.slice(0, 2)}${"•".repeat(Math.max(1, Math.min(6, name.length - 2)))}@${domain}`;
+}
+
+const STATUS_AR: Record<string, string> = {
+  delivered: "✅ مكتمل",
+  COMPLETED: "✅ مكتمل",
+  processing: "⏳ قيد التنفيذ",
+  PENDING_MANUAL: "🕒 بانتظار التنفيذ",
+  PENDING_VAULT: "🕒 بانتظار التنفيذ",
+  DECLINED: "↩️ ملغى ومسترد",
+  CANCELLED_BY_ADMIN: "↩️ ملغى",
+  failed: "❌ فشل",
+};
+
+async function chatMenu(chatId: string, textIn: string, link: { user_id: string | null; is_admin: boolean } | null, site: string) {
+  const send = (html: string, markup?: Record<string, unknown>) => sendTelegram(html, [chatId], markup ? { reply_markup: markup } : { reply_markup: keyboardFor(link) });
+  const linkButton = { inline_keyboard: [[{ text: "🔗 ربط حسابي الآن · Link my account", url: `${site}/?tg=link` }]] };
+  const want = (pattern: RegExp, button: string) => pattern.test(textIn) || textIn === button;
+  const state = link ? await loadServerState() : null;
+  const user = link?.user_id ? state?.users.find((row) => row.id === link.user_id) : undefined;
+
+  if (!link) {
+    await send(
+      "👋 <b>أهلاً بك في بوت زوفا شارج</b>\n\nهذا الحساب على تيليغرام غير مربوط بعد.\nاضغط الزر بالأسفل، سجّل دخولك في الموقع، وسيُربط حسابك تلقائياً لتصلك تنبيهات طلباتك ورصيدك.\n\nThis Telegram isn't linked yet — tap the button, sign in on the site, and it links automatically.",
+      linkButton,
+    );
+    return;
+  }
+
+  if (want(/^\/admin\b/i, BTN.admin)) {
+    if (!link.is_admin || !state) {
+      await send("⛔️ هذه اللوحة للمدراء المرتبطين فقط.\nAdmins only.");
+      return;
+    }
+    const since = Date.now() - 24 * 3_600_000;
+    const rate = state.sypRate ?? 145;
+    const usd = (cents: number, currency?: string) => (currency === "SYP" ? cents / 100 / rate : cents / 100);
+    const today = state.orders.filter((order) => Date.parse(order.createdAt) >= since && !["failed", "DECLINED", "CANCELLED_BY_ADMIN"].includes(order.status));
+    const sales = today.reduce((sum, order) => sum + usd(order.priceCents, order.currency), 0);
+    const cost = today.reduce((sum, order) => sum + (order.provider?.costUsd ?? 0), 0);
+    const manual = state.orders.filter((order) => order.status === "PENDING_MANUAL" || order.status === "PENDING_VAULT").length;
+    const topups = state.balanceRequests.filter((item) => item.status === "PROCESSING").length;
+    const working = state.orders.filter((order) => order.status === "processing" && order.provider).length;
+    await send(
+      [
+        "📊 <b>ملخص آخر 24 ساعة</b>",
+        `🛍 الطلبات: <b>${today.length}</b>`,
+        `💵 المبيعات: <b>$${sales.toFixed(2)}</b>`,
+        `🏷 تكلفة Mega: $${cost.toFixed(2)} · الصافي: <b>$${(sales - cost).toFixed(2)}</b>`,
+        "",
+        `🕒 طلبات يدوية بانتظارك: <b>${manual}</b>`,
+        `💰 طلبات شحن بانتظارك: <b>${topups}</b>`,
+        `⚡ قيد التنفيذ عند Mega: ${working}`,
+      ].join("\n"),
+      { inline_keyboard: [[{ text: "🛠 فتح لوحة الإدارة", url: `${site}/admin` }]] },
+    );
+    return;
+  }
+
+  if (!user) {
+    // An admin-only chat (no customer account behind it).
+    await send(
+      link.is_admin
+        ? "🛡 <b>أنت مرتبط كمدير.</b>\nتصلك هنا تنبيهات الشحن والطلبات والمشتريات والدعم.\nاضغط «📊 لوحة الإدارة» للملخص.\n\nلربط حسابك الشخصي أيضاً اضغط الزر بالأسفل."
+        : "⚠️ الحساب المرتبط لم يعد موجوداً. اربط من جديد.",
+      linkButton,
+    );
+    return;
+  }
+
+  const balance = user.currency === "SYP" ? `${Math.round(user.balanceCents / 100).toLocaleString("en-US")} SYP` : `$${(user.balanceCents / 100).toFixed(2)}`;
+  if (want(/^\/orders\b/i, BTN.orders)) {
+    const mine = state!.orders
+      .filter((order) => order.userId === user.id)
+      .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))
+      .slice(0, 5);
+    await send(
+      mine.length
+        ? [
+            "🧾 <b>آخر طلباتك</b>",
+            "",
+            ...mine.map(
+              (order) =>
+                `${STATUS_AR[order.status] ?? order.status} · ${tgEscape(order.serviceName)} · ${tgEscape(order.packageName)}\n   💵 ${tgEscape(order.currency === "SYP" ? `${Math.round(order.priceCents / 100).toLocaleString("en-US")} SYP` : `$${(order.priceCents / 100).toFixed(2)}`)}${order.receiptNumber ? ` · #${tgEscape(order.receiptNumber)}` : ""}`,
+            ),
+          ].join("\n")
+        : "🧾 لا توجد طلبات بعد. ابدأ أول شحن من الموقع 🎮",
+      { inline_keyboard: [[{ text: "📦 كل الطلبات في الموقع", url: `${site}/orders` }]] },
+    );
+    return;
+  }
+  if (want(/^\/(me|balance|account)\b/i, BTN.me)) {
+    await send(
+      [
+        `👤 <b>${tgEscape(user.name)}</b>${user.role === "VIP" ? " · ⭐️ VIP" : user.role === "ADMIN" ? " · 🛡 Admin" : ""}`,
+        `📧 ${tgEscape(maskEmail(user.email))}`,
+        `💰 الرصيد: <b>${tgEscape(balance)}</b>`,
+        "",
+        "🔔 تصلك هنا تنبيهات طلباتك وشحن محفظتك وردود الدعم.",
+      ].join("\n"),
+      { inline_keyboard: [[{ text: "💳 شحن المحفظة", url: `${site}/wallet` }, { text: "🎮 المتجر", url: site }]] },
+    );
+    return;
+  }
+  // /start, /help, anything else → welcome back
+  await send(
+    [
+      `👋 <b>أهلاً ${tgEscape(user.name)}!</b>`,
+      `حسابك مربوط ✅ · ${tgEscape(maskEmail(user.email))}`,
+      `💰 الرصيد: <b>${tgEscape(balance)}</b>`,
+      "",
+      `${BTN.me} — حسابك ورصيدك`,
+      `${BTN.orders} — آخر 5 طلبات`,
+      ...(link.is_admin ? [`${BTN.admin} — ملخص اليوم للإدارة`] : []),
+      "/stop — إلغاء الربط",
+    ].join("\n"),
+  );
 }
 
 /* ------------------------------ notify ------------------------------ */
@@ -218,6 +370,13 @@ async function notify(body: Record<string, unknown>) {
 type State = NonNullable<Awaited<ReturnType<typeof loadServerState>>>;
 
 function build(state: State, kind: Kind, id: string, messageId?: string): Built | null {
+  if (kind === "purchase") {
+    // v38.4: a completed purchase, for the admin chats (Mega deliveries send the same key themselves).
+    const order = state.orders.find((row) => row.id === id);
+    if (!order || !["delivered", "COMPLETED"].includes(order.status) || !fresh(order.resolvedAt ?? order.createdAt)) return null;
+    const buyer = state.users.find((user) => user.id === order.userId);
+    return { key: `purchase:${order.id}`, text: purchaseAlertHtml(order, { name: buyer?.name, email: buyer?.email }, state.sypRate ?? 145), to: { admin: true } };
+  }
   if (kind === "topup_result") {
     const item = state.balanceRequests.find((row) => row.id === id);
     if (!item || item.status === "PROCESSING" || !fresh(item.resolvedAt)) return null;

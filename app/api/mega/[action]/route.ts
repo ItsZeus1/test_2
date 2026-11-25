@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-import { adminChatIds, claimTelegramEvent, sendTelegram, telegramConfigured, tgEscape, userChatIds } from "@/lib/server/push";
+import { adminChatIds, claimTelegramEvent, purchaseAlertHtml, sendTelegram, telegramConfigured, tgEscape, userChatIds } from "@/lib/server/push";
 import {
   adminClient,
   adminFromToken,
@@ -219,6 +219,10 @@ async function refund(order: StoredOrder, note: string, track: ProviderTrack): P
     await tellAdmins(`mega:refund-needed:${order.id}`, `⚠️ <b>Mega: يلزم استرداد يدوي</b>\n${tgEscape(order.serviceName)} · ${tgEscape(order.packageName)}\n${tgEscape(note)}\n#${tgEscape(order.receiptNumber ?? order.id)}`);
     return false;
   }
+  await tellAdmins(
+    `refund:${order.id}`,
+    `↩️ <b>Mega: أُلغي طلب وأُعيد المبلغ للزبون</b>\n🛒 ${tgEscape(order.serviceName)} · ${tgEscape(order.packageName)}\n💵 ${tgEscape(money(order.priceCents, order.currency))}\n${tgEscape(note)}${order.receiptNumber ? `\n\n🧾 #${tgEscape(order.receiptNumber)}` : ""}`,
+  );
   await tellCustomer(
     `order_result:${order.id}`,
     order.userId,
@@ -236,7 +240,7 @@ async function toManual(order: StoredOrder, track: ProviderTrack, reason: string
   );
 }
 
-async function delivered(order: StoredOrder, track: ProviderTrack, row: MegaOrderRow): Promise<void> {
+async function delivered(order: StoredOrder, track: ProviderTrack, row: MegaOrderRow, state?: NovaState): Promise<void> {
   const codes = (row.codes ?? []).map((code) => String(code)).filter(Boolean).slice(0, 20);
   const note = String(row.noteplus ?? (Array.isArray(row.notes) ? row.notes[0] ?? "" : "")).slice(0, 200);
   const next: ProviderTrack = { ...step(track, "completed", note || undefined), ...(codes.length ? { codes } : {}), ...(note ? { note } : {}) };
@@ -252,6 +256,9 @@ async function delivered(order: StoredOrder, track: ProviderTrack, row: MegaOrde
       ...(order.receiptNumber ? ["", `🧾 رقم الطلب: #${tgEscape(order.receiptNumber)}`] : []),
     ].join("\n"),
   );
+  // v38.4: the same purchase also lands in the (max 3) admin Telegram chats — no per-device setup.
+  const buyer = state?.users.find((user) => user.id === order.userId);
+  await tellAdmins(`purchase:${order.id}`, purchaseAlertHtml({ ...order, status: "delivered", provider: next }, { name: buyer?.name, email: buyer?.email }, state?.sypRate ?? DEFAULT_SYP_RATE_VALUE));
 }
 
 /* ====================================================================== sending an order */
@@ -338,7 +345,7 @@ async function sendToMega(state: NovaState, order: StoredOrder): Promise<"delive
   if ((reply.status === 200 || reply.status === 201) && data?.order_number) {
     let next: ProviderTrack = { ...step(track, "processing", `Mega ${data.order_number}`), orderNumber: data.order_number, costUsd: unit * qty };
     if (data.status === "completed") {
-      await delivered(order, next, data);
+      await delivered(order, next, data, state);
       return "delivered";
     }
     if (data.status === "pending") next = step(next, "pending");
@@ -432,7 +439,7 @@ async function runCheck(): Promise<Record<string, unknown>> {
       const note = String(row.noteplus ?? (Array.isArray(row.notes) ? row.notes[0] ?? "" : "")).slice(0, 200);
       const base: ProviderTrack = row.order_number && !track.orderNumber ? { ...track, orderNumber: row.order_number } : track;
       if (status === "completed") {
-        await delivered(order, base, row);
+        await delivered(order, base, row, state);
         updated += 1;
       } else if (status === "cancelled") {
         await refund(order, note || "ألغى المزود الطلب — أُعيد المبلغ", step(base, "cancelled", note));

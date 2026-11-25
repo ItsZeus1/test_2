@@ -106,10 +106,10 @@ export async function telegramApi(method: string, payload: Record<string, unknow
 }
 
 /** Sends the message to each chat. Returns how many accepted it. */
-export async function sendTelegram(html: string, chatIds: string[]): Promise<number> {
+export async function sendTelegram(html: string, chatIds: string[], extra?: Record<string, unknown>): Promise<number> {
   const unique = [...new Set(chatIds.filter(Boolean))];
   const results = await Promise.all(
-    unique.map((chatId) => telegramApi("sendMessage", { chat_id: chatId, text: html.slice(0, 4000), parse_mode: "HTML", disable_web_page_preview: true })),
+    unique.map((chatId) => telegramApi("sendMessage", { chat_id: chatId, text: html.slice(0, 4000), parse_mode: "HTML", disable_web_page_preview: true, ...(extra ?? {}) })),
   );
   return results.filter((result) => result.ok).length;
 }
@@ -141,4 +141,33 @@ export async function claimTelegramEvent(id: string): Promise<boolean> {
   if (!supabase) return true;
   const { error } = await supabase.from("push_events").insert({ id });
   return !error || error.code !== "23505";
+}
+
+/* ------------------------------------------------------------------ v38.4 admin purchase alert */
+
+type PurchaseOrder = {
+  id: string;
+  serviceName: string;
+  packageName: string;
+  priceCents: number;
+  currency?: string;
+  receiptNumber?: string;
+  status: string;
+  provider?: { name?: string; orderNumber?: string; costUsd?: number } | undefined;
+};
+
+/** One message for the (max 3) admin chats when a purchase is completed — the same text from every path. */
+export function purchaseAlertHtml(order: PurchaseOrder, who?: { name?: string; email?: string }, sypRate = 145): string {
+  const price = order.currency === "SYP" ? `${Math.round(order.priceCents / 100).toLocaleString("en-US")} SYP` : `$${(order.priceCents / 100).toFixed(2)}`;
+  const paidUsd = order.currency === "SYP" ? order.priceCents / 100 / sypRate : order.priceCents / 100;
+  const cost = order.provider?.costUsd;
+  const lines = [
+    "🛍 <b>عملية شراء مكتملة · Purchase completed</b>",
+    who?.name || who?.email ? `👤 ${tgEscape(who?.name ?? "")}${who?.email ? ` · ${tgEscape(who.email)}` : ""}` : "",
+    `🛒 ${tgEscape(order.serviceName)} · ${tgEscape(order.packageName)}`,
+    `💵 ${tgEscape(price)}${typeof cost === "number" && cost > 0 ? ` · Mega $${cost.toFixed(2)} · ربح $${(paidUsd - cost).toFixed(2)}` : ""}`,
+    order.provider?.name === "MEGA" ? `⚡ تلقائي عبر Mega${order.provider.orderNumber ? ` #${tgEscape(order.provider.orderNumber)}` : ""}` : "✋ تنفيذ يدوي / فوري",
+    order.receiptNumber ? `\n🧾 #${tgEscape(order.receiptNumber)}` : "",
+  ];
+  return lines.filter(Boolean).join("\n");
 }

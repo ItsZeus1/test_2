@@ -1034,7 +1034,7 @@ export function whenSynced(): Promise<void> {
  * v35: closed-browser admin alerts through the Telegram bot. Fire-and-forget: the server re-reads
  * the saved event (so nobody can make it send made-up text) and does nothing until the bot is set up.
  */
-type TelegramKind = "topup" | "support" | "recovery" | "manual" | "honeypot" | "topup_result" | "order_result" | "support_reply";
+type TelegramKind = "topup" | "support" | "recovery" | "manual" | "honeypot" | "topup_result" | "order_result" | "support_reply" | "purchase";
 
 function notifyTelegram(body: { kind: TelegramKind; id: string; messageId?: string }): void {
   if (typeof window === "undefined" || !supabaseEnv().enabled) return;
@@ -2377,6 +2377,8 @@ export async function purchase(input: unknown): Promise<Ok<{ order: OrderRow; pr
       const delivered = await serverDispatch(outcome.order.id);
       if (delivered) outcome.order = { ...outcome.order, status: "delivered" };
     }
+    // v38.4: completed purchases reach the admin Telegram chats (Mega deliveries already send the same one).
+    if (outcome.order.status === "delivered") notifyTelegram({ kind: "purchase", id: outcome.order.id });
     return { ok: true, ...outcome };
   } catch (error) {
     return { ok: false, error: fail(error) };
@@ -3398,6 +3400,7 @@ export async function resolveManualOrder(input: unknown): Promise<{ ok: true } |
       return { state, result: undefined };
     });
     notifyAdmins({ kind: "order_result", id: parsed.data.orderId });
+    if (parsed.data.action === "ACCEPT") notifyTelegram({ kind: "purchase", id: parsed.data.orderId });
     return { ok: true };
   } catch (error) {
     return { ok: false, error: fail(error) };

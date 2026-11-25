@@ -930,3 +930,150 @@ function FavoritesNavButton() {
     </Link>
   );
 }
+
+/* ===================================================================== v38.4 Telegram reminder */
+
+const NUDGE_KEY = "zc-tg-nudge-until";
+const PENDING_KEY = "zc-tg-pending";
+const NUDGE_DELAY_MS = 15_000;
+const SNOOZE_MS = 3 * 24 * 3_600_000;
+
+/**
+ * 15 s after a signed-in customer lands, if their account isn't linked to Telegram, a small card
+ * invites them to link it (later = quiet for 3 days). The bot's "Link my account" button opens the
+ * site with ?tg=link, which starts the link right away (after sign-in if needed).
+ */
+export function TelegramNudge() {
+  const { language } = useI18n();
+  const ar = language === "ar";
+  const { profile, ready } = useProfileState();
+  const [show, setShow] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const signedIn = Boolean(profile);
+
+  async function startLink(sameTab: boolean) {
+    setBusy(true);
+    // A new tab must open inside the tap, before waiting on the server (popup blockers).
+    const tab = sameTab ? null : window.open("about:blank", "_blank");
+    const result = await linkTelegram();
+    setBusy(false);
+    if (!result.ok) {
+      tab?.close();
+      toast.error(result.error);
+      return;
+    }
+    setShow(false);
+    try {
+      sessionStorage.removeItem(PENDING_KEY);
+    } catch {
+      /* private mode */
+    }
+    if (tab) tab.location.href = result.url;
+    else window.location.href = result.url;
+    toast(ar ? "اضغط «Start» في تيليغرام لإتمام الربط" : "Press Start in Telegram to finish linking");
+  }
+
+  // Arriving from the bot (?tg=link): link now, or right after signing in.
+  useEffect(() => {
+    if (!ready) return;
+    let pending = false;
+    try {
+      const url = new URL(window.location.href);
+      if (url.searchParams.get("tg") === "link") {
+        url.searchParams.delete("tg");
+        window.history.replaceState(null, "", url.pathname + url.search + url.hash);
+        sessionStorage.setItem(PENDING_KEY, "1");
+      }
+      pending = sessionStorage.getItem(PENDING_KEY) === "1";
+    } catch {
+      pending = false;
+    }
+    if (!pending) return;
+    if (!signedIn) {
+      toast(ar ? "سجّل الدخول أولاً، وسنربط تيليغرام مباشرة بعدها" : "Sign in first — Telegram links right after", { id: "tg-pending" });
+      return;
+    }
+    void getTelegramStatus().then((status) => {
+      if (!status.configured) return;
+      if (status.linked) {
+        try {
+          sessionStorage.removeItem(PENDING_KEY);
+        } catch {
+          /* ignore */
+        }
+        toast.success(ar ? "حسابك مربوط بتيليغرام بالفعل ✓" : "Already linked to Telegram ✓");
+        return;
+      }
+      void startLink(true);
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ready, signedIn]);
+
+  // The 15-second reminder.
+  useEffect(() => {
+    if (!ready || !signedIn) return;
+    let snoozed = false;
+    try {
+      snoozed = Number(localStorage.getItem(NUDGE_KEY) ?? 0) > Date.now() || sessionStorage.getItem("zc-tg-nudged") === "1";
+    } catch {
+      snoozed = false;
+    }
+    if (snoozed) return;
+    let cancel = false;
+    const timer = window.setTimeout(() => {
+      void getTelegramStatus().then((status) => {
+        if (cancel || !status.configured || status.linked) return;
+        setShow(true);
+        try {
+          sessionStorage.setItem("zc-tg-nudged", "1");
+        } catch {
+          /* ignore */
+        }
+      });
+    }, NUDGE_DELAY_MS);
+    return () => {
+      cancel = true;
+      window.clearTimeout(timer);
+    };
+  }, [ready, signedIn]);
+
+  if (!show || !signedIn) return null;
+  const later = () => {
+    setShow(false);
+    try {
+      localStorage.setItem(NUDGE_KEY, String(Date.now() + SNOOZE_MS));
+    } catch {
+      /* ignore */
+    }
+  };
+  return (
+    <aside className="tg-nudge fixed inset-x-3 bottom-[calc(5.75rem+env(safe-area-inset-bottom))] z-[95] mx-auto max-w-md rounded-[24px] p-4 sm:bottom-6" role="dialog" aria-labelledby="tg-nudge-title" aria-live="polite">
+      <div className="flex items-start gap-3">
+        <span className="tg-nudge-icon grid size-11 shrink-0 place-items-center rounded-[14px]" aria-hidden>
+          <Send className="size-5" />
+        </span>
+        <div className="min-w-0 flex-1">
+          <p id="tg-nudge-title" className="font-display text-sm font-extrabold">
+            {ar ? "لا تفوّت أي تنبيه 🔔" : "Never miss an alert 🔔"}
+          </p>
+          <p className="mt-1 text-xs leading-relaxed text-muted">
+            {ar
+              ? "اربط تيليغرام لتصلك فوراً أكواد طلباتك، وموافقة شحن المحفظة، وردود الدعم — لحسابك فقط."
+              : "Link Telegram to get your order codes, wallet approvals and support replies instantly — for your account only."}
+          </p>
+        </div>
+        <button type="button" onClick={later} aria-label={ar ? "إغلاق" : "Close"} className="-me-1 -mt-1 grid size-10 shrink-0 place-items-center rounded-full text-muted">
+          <X className="size-4" aria-hidden />
+        </button>
+      </div>
+      <div className="mt-3 flex gap-2">
+        <button type="button" onClick={later} className="min-h-11 flex-1 rounded-[14px] text-xs font-bold text-muted">
+          {ar ? "لاحقاً" : "Later"}
+        </button>
+        <button type="button" disabled={busy} onClick={() => void startLink(false)} className="tg-nudge-go keep-white min-h-11 flex-[2] rounded-[14px] text-sm font-extrabold disabled:opacity-60">
+          {busy ? "…" : ar ? "ربط تيليغرام الآن" : "Link Telegram now"}
+        </button>
+      </div>
+    </aside>
+  );
+}
