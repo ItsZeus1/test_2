@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Link, useNavigate } from "@/lib/nav";
 import { ArrowLeft, Banknote, CircleOff, Hourglass, Lightbulb, PackageCheck, Pencil, Plus, ShieldAlert, Target, X, Zap } from "lucide-react";
@@ -17,9 +17,9 @@ import { VipMarginPicker, sellingPrice } from "@/components/vip-margin";
 import { ServiceMark } from "@/components/service-mark";
 import { FavoriteHeart, useProfileState } from "@/components/profile";
 import { categoryName, orderStatusText, serviceText, targetText, useI18n, useMoney } from "@/lib/i18n";
-import { CHARGE_COOLDOWN_MS, getPublicService, getSypRate, getViewerService, markVaultDelivered, peekService, purchase, recordServiceVisit, setSavedPlayerId } from "@/lib/store/api";
+import { CHARGE_COOLDOWN_MS, getPublicService, getSypRate, getViewerService, listMyOrders, markVaultDelivered, peekService, purchase, recordServiceVisit, setSavedPlayerId } from "@/lib/store/api";
 import { useNovaUi, useScrollLock } from "@/lib/ui-store";
-import { type CustomField, type PublicPackage, type ServiceDetail } from "@/lib/store/types";
+import { type CustomField, type OrderRow, type PublicPackage, type ServiceDetail } from "@/lib/store/types";
 
 export function ServiceCheckout({ slug }: { slug: string }) {
   const { language, t } = useI18n();
@@ -92,6 +92,31 @@ export function ServiceCheckout({ slug }: { slug: string }) {
   const fieldLabel = (field: CustomField) => (language === "ar" ? field.labelAr || field.labelEn : field.labelEn || field.labelAr);
   const fieldAnswers = customFields.map((field) => ({ id: field.id, value: (fieldValues[field.id] ?? "").trim() }));
   const missingField = customFields.find((field, index) => field.required && !fieldAnswers[index].value);
+
+  // v38.6: IDs this customer already paid with on this service (newest first) — offered as they type.
+  const [history, setHistory] = useState<OrderRow[]>([]);
+  useEffect(() => {
+    if (!profile || !service) return;
+    let cancel = false;
+    void listMyOrders().then((rows) => {
+      if (!cancel) setHistory(rows);
+    });
+    return () => {
+      cancel = true;
+    };
+  }, [profile?.userId, service?.slug, receipt]);
+  const mine = useMemo(() => history.filter((order) => order.serviceSlug === service?.slug && order.status !== "failed"), [history, service?.slug]);
+  const unique = (values: string[]) => [...new Set(values.map((value) => value.trim()).filter((value) => value.length >= 2))].slice(0, 12);
+  const targetSuggestions = useMemo(() => unique([savedId, ...mine.map((order) => order.targetId ?? "")]), [mine, savedId]);
+  const fieldSuggestions = (field: CustomField, index: number) =>
+    unique([
+      ...(index === 0 ? [savedId] : []),
+      ...mine.flatMap((order) =>
+        (order.fields ?? [])
+          .filter((answer) => answer.id === field.id || (answer.labelAr && answer.labelAr === field.labelAr) || (answer.labelEn && answer.labelEn === field.labelEn))
+          .map((answer) => answer.value),
+      ),
+    ]);
   // v32.1: region / type step (iTunes USA · UAE…) — pick one, then only its sizes show.
   const regions = service?.regions ?? [];
   const [regionId, setRegionId] = useState<string>("");
@@ -226,6 +251,13 @@ export function ServiceCheckout({ slug }: { slug: string }) {
       if (result.order.status === "delivered" || result.order.status === "COMPLETED") playGameChargeSuccessSound();
       setConfirming(false);
       setBuying(null);
+      // v38.6: the ID just paid with is remembered for this game (when none is saved yet).
+      const usedId = (useFields ? (fieldAnswers[0]?.value ?? "") : noInput ? "" : targetId).trim();
+      if (service && usedId.length >= 3 && !savedId) {
+        void setSavedPlayerId({ slug: service.slug, playerId: usedId.slice(0, 64) }).then((saved) => {
+          if (saved.ok) setProfile(saved.profile);
+        });
+      }
       setTargetId("");
       toast.success(`${result.order.serviceName} · ${result.order.packageName}`);
       if (result.order.status === "PENDING_VAULT") {
@@ -681,17 +713,16 @@ export function ServiceCheckout({ slug }: { slug: string }) {
                           ))}
                         </select>
                       ) : (
-                        <input
+                        <IdInput
                           id={id}
                           value={fieldValues[field.id] ?? ""}
-                          onChange={(event) => setFieldValues((current) => ({ ...current, [field.id]: event.target.value }))}
+                          onChange={(value) => setFieldValues((current) => ({ ...current, [field.id]: value }))}
+                          suggestions={fieldSuggestions(field, customFields.indexOf(field))}
                           placeholder={(language === "ar" ? field.placeholderAr || field.placeholderEn : field.placeholderEn || field.placeholderAr) ?? fieldLabel(field)}
                           dir="auto"
                           required={field.required}
-                          aria-required={field.required}
-                          maxLength={300}
+                          ar={language === "ar"}
                           className="field mt-1.5"
-                          autoComplete="off"
                         />
                       )}
                     </div>
@@ -733,16 +764,19 @@ export function ServiceCheckout({ slug }: { slug: string }) {
                 )
               ) : null}
             </div>
-            <input
-              id="target-id"
-              value={targetId}
-              onChange={(event) => setTargetId(event.target.value)}
-              placeholder={landline ? t.landlinePh : targetText(t, service.category)}
-              dir="ltr"
-              inputMode={landline ? "tel" : undefined}
-              className={`field mt-2 ${noInput || useFields ? "hidden" : ""}`}
-              autoComplete="off"
-            />
+            {noInput || useFields ? null : (
+              <IdInput
+                id="target-id"
+                value={targetId}
+                onChange={setTargetId}
+                suggestions={targetSuggestions}
+                placeholder={landline ? t.landlinePh : targetText(t, service.category)}
+                dir="ltr"
+                inputMode={landline ? "tel" : undefined}
+                ar={language === "ar"}
+                className="field mt-2"
+              />
+            )}
             {formError ? <p className="mt-3 text-sm text-rose-200">{formError}</p> : null}
             {profile && profile.balanceCents < buying.priceCents ? (
               <button type="button" onClick={openSelfTopUp} className="mt-3 text-sm font-semibold text-[#1e3a8a]">
@@ -964,5 +998,129 @@ function AmountSlider({
         <span>{compactAmount(max)}</span>
       </div>
     </div>
+  );
+}
+
+/* ===================================================================== v38.6 recent IDs */
+
+/**
+ * An ID box that remembers: tap it (or type the first digits) and the IDs this customer already paid
+ * with on this game drop down — newest first, the saved one on top. Typing still works as normal.
+ */
+function IdInput({
+  id,
+  value,
+  onChange,
+  suggestions,
+  placeholder,
+  dir,
+  inputMode,
+  required,
+  ar,
+  className,
+}: {
+  id: string;
+  value: string;
+  onChange: (value: string) => void;
+  suggestions: string[];
+  placeholder: string;
+  dir: "ltr" | "auto";
+  inputMode?: "tel";
+  required?: boolean;
+  ar: boolean;
+  className: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const [active, setActive] = useState(-1);
+  const box = useRef<HTMLDivElement>(null);
+  const typed = value.trim().toLowerCase();
+  const matches = suggestions.filter((item) => item.toLowerCase() !== typed && (!typed || item.toLowerCase().includes(typed))).slice(0, 6);
+  const show = open && matches.length > 0;
+  const listId = `${id}-recent`;
+  const pick = (item: string) => {
+    onChange(item);
+    setOpen(false);
+    setActive(-1);
+  };
+  return (
+    <div ref={box} className="relative">
+      <input
+        id={id}
+        value={value}
+        onChange={(event) => {
+          onChange(event.target.value);
+          setOpen(true);
+          setActive(-1);
+        }}
+        onFocus={() => setOpen(true)}
+        onBlur={(event) => {
+          if (!box.current?.contains(event.relatedTarget as Node | null)) setOpen(false);
+        }}
+        onKeyDown={(event) => {
+          if (!show) return;
+          if (event.key === "ArrowDown") {
+            event.preventDefault();
+            setActive((index) => (index + 1) % matches.length);
+          } else if (event.key === "ArrowUp") {
+            event.preventDefault();
+            setActive((index) => (index <= 0 ? matches.length - 1 : index - 1));
+          } else if (event.key === "Enter" && active >= 0) {
+            event.preventDefault();
+            pick(matches[active]);
+          } else if (event.key === "Escape") setOpen(false);
+        }}
+        placeholder={placeholder}
+        dir={dir}
+        inputMode={inputMode}
+        required={required}
+        aria-required={required}
+        maxLength={300}
+        className={className}
+        autoComplete="off"
+        role="combobox"
+        aria-autocomplete="list"
+        aria-expanded={show}
+        aria-controls={listId}
+        aria-activedescendant={show && active >= 0 ? `${listId}-${active}` : undefined}
+      />
+      {show ? (
+        <ul id={listId} role="listbox" className="recent-ids absolute inset-x-0 top-full z-20 mt-1 overflow-hidden rounded-[14px] p-1" aria-label={ar ? "معرّفات سابقة" : "Previous IDs"}>
+          <li className="px-2.5 pt-1 pb-0.5 text-[10px] font-bold tracking-wide text-muted" aria-hidden>
+            {ar ? "استخدمتها من قبل" : "Used before"}
+          </li>
+          {matches.map((item, index) => (
+            <li key={item} id={`${listId}-${index}`} role="option" aria-selected={index === active}>
+              <button
+                type="button"
+                tabIndex={-1}
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={() => pick(item)}
+                className={`recent-id flex min-h-11 w-full items-center gap-2 rounded-[10px] px-2.5 text-start ${index === active ? "is-active" : ""}`}
+              >
+                <Target className="size-3.5 shrink-0 opacity-60" strokeWidth={1.75} aria-hidden />
+                <span className="price-num min-w-0 flex-1 truncate text-sm font-bold" dir="ltr">
+                  {highlight(item, typed)}
+                </span>
+                {index === 0 && !typed ? <span className="shrink-0 text-[10px] font-bold text-muted">{ar ? "الأحدث" : "latest"}</span> : null}
+              </button>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+    </div>
+  );
+}
+
+/** Bold the part the customer already typed. */
+function highlight(item: string, typed: string) {
+  if (!typed) return item;
+  const at = item.toLowerCase().indexOf(typed);
+  if (at < 0) return item;
+  return (
+    <>
+      {item.slice(0, at)}
+      <mark className="recent-id-hit">{item.slice(at, at + typed.length)}</mark>
+      {item.slice(at + typed.length)}
+    </>
   );
 }
